@@ -1,0 +1,7 @@
+{ "accent": "#4338CA",
+  "scenes": [
+    { "name": "1-live", "title": "Watch the clock", "body": "A live count of what has started and an estimate of the seconds left." },
+    { "name": "2-timeline", "title": "Every item on one chart", "body": "Start to settled for each program, with the moment the PC became usable." },
+    { "name": "3-cost", "title": "Spot the heavy hitters", "body": "Programs ranked by processor time and by how long they took to settle." },
+    { "name": "4-delay", "title": "Fix it from the list", "body": "Defer a program until the PC is ready, or switch it off at sign-in." }
+  ] }
