@@ -87,6 +87,7 @@ jobs:
 
           vpk pack `
             -u StartupMonitor `
+            --packTitle "Windows Startup Monitor" `
             -v $version `
             -p target\publish `
             -e startup_monitor.exe `
