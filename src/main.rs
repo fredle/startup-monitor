@@ -12,7 +12,10 @@ mod autostart;
 mod brand;
 mod diag;
 mod history;
+mod live;
 mod monitor;
+mod overlay;
+mod pause;
 mod settings;
 mod startup;
 mod win;
@@ -35,6 +38,12 @@ fn main() {
     }
     if !args.iter().any(|a| a == "--shots") {
         update::maybe_spawn_background_update();
+    }
+
+    // A pause that a quit or crash cut short must not leave apps frozen.
+    // While a collector runs, its pause is its own business.
+    if !args.iter().any(|a| a == "--shots") && !win::mutex_exists(brand::COLLECTOR_MUTEX) {
+        pause::release_all();
     }
 
     if let Err(e) = app::run(args) {

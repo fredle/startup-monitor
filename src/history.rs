@@ -119,6 +119,10 @@ pub struct BootRecord {
     #[serde(default)]
     pub watched_ms: u64,
     pub items: Vec<ItemRecord>,
+    /// ms after sign-in when the user paused the rest of startup. Such a
+    /// boot was cut short by hand, so it is left out of the usual times.
+    #[serde(default)]
+    pub paused_ms: Option<u64>,
 }
 
 impl BootRecord {
@@ -128,6 +132,19 @@ impl BootRecord {
     pub fn progress(&self) -> (usize, usize) {
         let counted: Vec<_> = self.items.iter().filter(|r| r.counts()).collect();
         (counted.iter().filter(|r| r.has_started()).count(), counted.len())
+    }
+
+    /// The same count for what runs as the user and for what runs as
+    /// Windows or administrator: (yours, system).
+    pub fn progress_split(&self) -> ((usize, usize), (usize, usize)) {
+        let mut yours = (0, 0);
+        let mut system = (0, 0);
+        for r in self.items.iter().filter(|r| r.counts()) {
+            let side = if r.item.runs_as_system() { &mut system } else { &mut yours };
+            side.0 += r.has_started() as usize;
+            side.1 += 1;
+        }
+        (yours, system)
     }
 }
 
@@ -171,14 +188,21 @@ pub fn median(values: &[u64]) -> Option<u64> {
 
 /// Time-to-usable of the last `COMPARE` boots, oldest first.
 pub fn recent_totals(history: &[BootRecord]) -> Vec<u64> {
-    let skip = history.len().saturating_sub(COMPARE);
-    history[skip..].iter().map(|b| b.usable_ms).collect()
+    let normal = normal(history);
+    let skip = normal.len().saturating_sub(COMPARE);
+    normal[skip..].iter().map(|b| b.usable_ms).collect()
+}
+
+/// Boots that ran their course: not paused by the user part-way.
+fn normal(history: &[BootRecord]) -> Vec<&BootRecord> {
+    history.iter().filter(|b| b.paused_ms.is_none()).collect()
 }
 
 /// When this item usually starts, from past boots.
 pub fn typical_start(history: &[BootRecord], id: &str) -> Option<u64> {
-    let skip = history.len().saturating_sub(COMPARE);
-    let starts: Vec<u64> = history[skip..]
+    let normal = normal(history);
+    let skip = normal.len().saturating_sub(COMPARE);
+    let starts: Vec<u64> = normal[skip..]
         .iter()
         .filter_map(|b| b.items.iter().find(|r| r.item.id == id))
         .filter_map(|r| r.start_ms)
@@ -194,8 +218,9 @@ pub const WATCH_END_MS: u64 = 600_000;
 /// started: not worth staying open for again. Boots that stopped watching
 /// sooner say nothing either way, so an item is re-checked as they age out.
 pub fn never_starts(history: &[BootRecord], id: &str) -> bool {
-    let skip = history.len().saturating_sub(COMPARE);
-    let full: Vec<&ItemRecord> = history[skip..]
+    let normal = normal(history);
+    let skip = normal.len().saturating_sub(COMPARE);
+    let full: Vec<&ItemRecord> = normal[skip..]
         .iter()
         .filter(|b| b.watched_ms >= WATCH_END_MS)
         .filter_map(|b| b.items.iter().find(|r| r.item.id == id))
@@ -272,7 +297,7 @@ mod tests {
     use crate::startup::Source;
 
     fn item(id: &str, source: Source) -> Item {
-        Item { id: id.into(), name: id.into(), source, command: String::new(), exe: None, about: String::new() }
+        Item { id: id.into(), name: id.into(), source, command: String::new(), exe: None, about: String::new(), as_system: false }
     }
 
     fn app(id: &str) -> Item {
@@ -286,6 +311,7 @@ mod tests {
             usable_ms: usable,
             watch_from_ms: 0,
             watched_ms: usable,
+            paused_ms: None,
             items: starts
                 .iter()
                 .map(|(id, s)| ItemRecord { start_ms: Some(*s), status: Status::Started, ..ItemRecord::new(app(id)) })
@@ -412,6 +438,22 @@ mod tests {
         b.items.push(early_svc);
         b.items.push(late_svc);
         assert_eq!(b.progress(), (1, 3));
+    }
+
+    #[test]
+    fn progress_splits_yours_from_system() {
+        let mut b = boot(1, 0, &[("a", 0)]);
+        b.items.push(ItemRecord::new(app("w")));
+        let mut svc = ItemRecord::new(item("s", Source::Service { name: "s".into(), delayed: false }));
+        svc.status = Status::Starting;
+        b.items.push(svc);
+        let mut task = ItemRecord::new(item("t", Source::Task { path: r"\\Vendor\\Updater".into() }));
+        task.item.as_system = true;
+        task.status = Status::Started;
+        task.start_ms = Some(5_000);
+        b.items.push(task);
+        assert_eq!(b.progress_split(), ((1, 2), (1, 2)));
+        assert_eq!(b.progress(), (2, 4));
     }
 
     #[test]

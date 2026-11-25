@@ -25,12 +25,16 @@ const BUSY_CPU_MS: u64 = 20;
 /// Once it has settled, it takes this much in a second to call it busy
 /// again: a passing blip must not reopen it and push "usable" back.
 const REBUSY_CPU_MS: u64 = 250;
+/// How often services are read while startup is timed.
+const SERVICE_POLL_MS: u64 = 3_000;
+/// Once usable, the collector looks this often for apps still to start.
+const AFTER_USABLE_TICK_MS: u64 = 2_000;
 /// A ready time rebuilt for an app that was already running is a guess, so
 /// for this long after watching began any activity still corrects it. After
 /// that it stands like a measured one.
 const ESTIMATE_GRACE_MS: u64 = 5_000;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Metrics {
     pub cpu: f32,
     pub mem: f32,
@@ -59,11 +63,17 @@ pub struct Shared {
     pub frames: u64,
     /// What the window did since the last tick, for the diagnostics log.
     pub events: Vec<String>,
+    /// A "pause the rest" in progress.
+    pub pause: Option<crate::pause::PauseView>,
 }
 
 pub enum Request {
     End(String),
     EndWhenSeen(String),
+    /// Freeze the startup apps still to settle, for `pause::PAUSE_MS`.
+    Pause,
+    /// Let every paused app carry on now.
+    Resume,
 }
 
 #[derive(Clone)]
@@ -73,6 +83,12 @@ pub struct Handle {
 }
 
 impl Handle {
+    /// A handle on state kept elsewhere: the full window's copy of a
+    /// collector in another process (see `live.rs`).
+    pub fn new(shared: Arc<Mutex<Shared>>, tx: Sender<Request>) -> Self {
+        Self { shared, tx }
+    }
+
     pub fn send(&self, r: Request) {
         let _ = self.tx.send(r);
     }
@@ -81,21 +97,50 @@ impl Handle {
 /// Starts the collector thread. `repaint` is called after every tick.
 pub fn spawn(mode: Mode, delayed: Vec<Item>, repaint: impl Fn() + Send + 'static) -> Handle {
     let shared = Arc::new(Mutex::new(Shared {
-        record: BootRecord { sign_in: 0, mode, usable_ms: 0, watch_from_ms: 0, watched_ms: 0, items: Vec::new() },
+        record: BootRecord { sign_in: 0, mode, usable_ms: 0, watch_from_ms: 0, watched_ms: 0, items: Vec::new(), paused_ms: None },
         metrics: Metrics::default(),
         listed: false,
         done: false,
         earlier: Vec::new(),
         note: None,
         finished: false,
-        exit_when_done: false,
+        // The collector has no window to keep open: it ends when done.
+        exit_when_done: true,
         frames: 0,
         events: Vec::new(),
+        pause: None,
     }));
     let (tx, rx) = channel();
     let s = shared.clone();
     std::thread::spawn(move || run(mode, delayed, s, rx, repaint));
     Handle { shared, tx }
+}
+
+/// A tick's processes, found by file name: each startup item compares
+/// itself only with processes of its own file name, not with all several
+/// hundred on the PC.
+pub struct ProcIndex<'a> {
+    by_name: HashMap<&'a str, Vec<&'a Proc>>,
+}
+
+impl<'a> ProcIndex<'a> {
+    pub fn new(all: &'a [Proc]) -> Self {
+        let mut by_name: HashMap<&str, Vec<&Proc>> = HashMap::with_capacity(all.len());
+        for p in all {
+            by_name.entry(p.name.as_str()).or_default().push(p);
+        }
+        Self { by_name }
+    }
+
+    /// Processes that may belong to `exe`: those with its file name.
+    /// `matches` decides.
+    pub fn named(&self, exe: &str) -> impl Iterator<Item = &'a Proc> + '_ {
+        let file = exe.rsplit('\\').next().unwrap_or(exe);
+        let with_exe = (!file.ends_with(".exe")).then(|| format!("{file}.exe"));
+        let a = self.by_name.get(file).into_iter().flatten();
+        let b = with_exe.and_then(|f| self.by_name.get(f.as_str())).into_iter().flatten();
+        a.chain(b).copied()
+    }
 }
 
 /// Does this process belong to the item?
@@ -194,6 +239,12 @@ struct Track {
     late: bool,
     /// Never started in recent boots watched to the end: not waited for.
     never_starts: bool,
+    /// Processes frozen by a pause, as (pid, creation time).
+    frozen: HashSet<(u32, u64)>,
+    /// When it was last frozen, FILETIME ticks.
+    frozen_at: u64,
+    /// The user wanted it back during this pause: left alone until it ends.
+    let_through: bool,
 }
 
 /// Still to show up when the PC becomes usable?
@@ -293,23 +344,49 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
         s.earlier = earlier.clone();
     }
 
-    let mut tasks = win::logon_tasks();
-    let mut last_task_poll = Instant::now();
+    let task_runs = win::TaskRuns::open();
+    let mut tasks: Vec<win::LogonTask> = Vec::new();
+    let mut last_task_poll: Option<Instant> = None;
+    let mut services: Vec<win::ServiceStatus> = Vec::new();
+    let mut last_service_poll: Option<Instant> = None;
     let mut quiet_since: Option<u64> = None;
     let mut usable_ms: Option<u64> = None;
     let mut late_started = 0;
     let mut first = true;
+    let mut pause_until: Option<u64> = None;
     let mut procs = procs;
 
     loop {
         let tick = Instant::now();
         let now = win::now_ft();
         let now_ms = ms_after(now, sign_in);
-        if last_task_poll.elapsed() > Duration::from_secs(5) {
-            tasks = win::logon_tasks();
-            last_task_poll = Instant::now();
+        // Task Scheduler is asked only while a sign-in task has not been
+        // seen: it is the one way to catch a task that ran and closed
+        // between two ticks, and it costs more than the rest of a tick.
+        // Only the tasks not yet seen are asked about, each by its path.
+        let unseen: Vec<&str> = if usable_ms.is_none() {
+            tracks
+                .iter()
+                .filter(|t| !t.seen)
+                .filter_map(|t| match &t.rec.item.source {
+                    Source::Task { path } => Some(path.as_str()),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !unseen.is_empty() && last_task_poll.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
+            tasks = task_runs.last_runs(&unseen);
+            last_task_poll = Some(Instant::now());
         }
-        let services = win::service_statuses();
+        // Services every few seconds, and not at all once usable: their
+        // start times come from Windows, so a slower look loses nothing, and
+        // reading them all costs as much as the rest of a tick.
+        if usable_ms.is_none() && last_service_poll.is_none_or(|at| at.elapsed() >= Duration::from_millis(SERVICE_POLL_MS)) {
+            services = win::service_statuses();
+            last_service_poll = Some(Instant::now());
+        }
         let (cpu, disk) = counters.as_mut().map(|c| c.sample()).unwrap_or((0.0, 0.0));
         let mem = win::memory_load();
 
@@ -317,6 +394,24 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
             let (id, now_or_later) = match &req {
                 Request::End(id) => (id.clone(), true),
                 Request::EndWhenSeen(id) => (id.clone(), false),
+                Request::Pause => {
+                    if pause_until.is_none() {
+                        pause_until = Some(now_ms + crate::pause::PAUSE_MS);
+                        shared.lock().unwrap().record.paused_ms.get_or_insert(now_ms);
+                        log.add(now_ms, "pause the rest");
+                    }
+                    continue;
+                }
+                Request::Resume => {
+                    if pause_until.take().is_some() {
+                        let n = resume_all(&mut tracks);
+                        log.add(now_ms, format!("resume now: {n} processes"));
+                        let mut s = shared.lock().unwrap();
+                        s.pause = None;
+                        s.note = Some("Everything carries on starting.".to_owned());
+                    }
+                    continue;
+                }
             };
             let Some(t) = tracks.iter_mut().find(|t| t.rec.item.id == id) else { continue };
             let note = if now_or_later {
@@ -336,11 +431,42 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
             shared.lock().unwrap().note = Some(note);
         }
 
+        if let Some(until) = pause_until {
+            if now_ms >= until {
+                pause_until = None;
+                let n = resume_all(&mut tracks);
+                log.add(now_ms, format!("pause over: {n} processes"));
+                shared.lock().unwrap().note = Some("The pause is over: everything carries on starting.".to_owned());
+            } else {
+                let (back, refused) = pause_tick(&mut tracks, &ProcIndex::new(&procs), session, sign_in, me);
+                for name in &back {
+                    log.add(now_ms, format!("let through {name}"));
+                }
+                if let Some(name) = back.last() {
+                    shared.lock().unwrap().note = Some(format!("{name} carries on: you opened it."));
+                }
+                if refused > 0 {
+                    log.add(now_ms, format!("pause refused for {refused} processes"));
+                }
+            }
+            let view = pause_until.map(|until_ms| crate::pause::PauseView {
+                until_ms,
+                items: tracks.iter().filter(|t| !t.frozen.is_empty()).map(|t| t.rec.item.id.clone()).collect(),
+            });
+            shared.lock().unwrap().pause = view;
+        }
+
+        let index = ProcIndex::new(&procs);
         for t in tracks.iter_mut() {
             // Once usable, the rest keep the figures they had at that moment.
             if usable_ms.is_none() || t.late {
-                update_track(t, &procs, &services, &tasks, session, sign_in, now_ms, first, watch_from_ms);
+                update_track(t, &index, &services, &tasks, session, sign_in, now_ms, first, watch_from_ms);
             }
+        }
+        if first {
+            // The startup list, history and first look are done: what they
+            // touched is not needed again.
+            win::trim_memory();
         }
         first = false;
         // Before the log line, so it carries this tick's verdict.
@@ -376,7 +502,8 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
             // items that had not shown up, and save again as each one does.
             let started = tracks.iter().filter(|t| t.late && t.rec.start_ms.is_some()).count();
             let pending = tracks.iter().any(|t| t.late && (is_missing(&t.rec) || t.rec.status == Status::Starting));
-            let finished = !pending || now_ms >= history::WATCH_END_MS;
+            // A pause must run out (and everything carry on) before the end.
+            let finished = (!pending || now_ms >= history::WATCH_END_MS) && pause_until.is_none();
             let exit = {
                 let mut s = shared.lock().unwrap();
                 s.metrics = Metrics { cpu, mem, disk, elapsed_ms: now_ms, eta_ms: None };
@@ -400,7 +527,9 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
                 }
                 return;
             }
-            std::thread::sleep(Duration::from_millis(1000).saturating_sub(tick.elapsed()));
+            // Only late apps are left to see start, and their start time
+            // comes from Windows: a slower look is just as exact.
+            std::thread::sleep(Duration::from_millis(AFTER_USABLE_TICK_MS).saturating_sub(tick.elapsed()));
             procs = lister.list();
             continue;
         }
@@ -442,6 +571,8 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
                 let all = history::push(earlier.clone(), s.record.clone());
                 history::save(&all);
                 s.done = true;
+                // The busy part is over: give back what it used.
+                win::trim_memory();
             } else {
                 s.record.items = tracks.iter().map(|t| t.rec.clone()).collect();
             }
@@ -458,10 +589,77 @@ fn run(mode: Mode, delayed: Vec<Item>, shared: Arc<Mutex<Shared>>, rx: Receiver<
     }
 }
 
+/// One second of a pause: freezes the pausable items' processes, and lets an
+/// item go when the user wants it back. Returns the names let go and how
+/// many processes Windows would not freeze.
+fn pause_tick(tracks: &mut [Track], procs: &ProcIndex, session: u32, sign_in: u64, me: u32) -> (Vec<String>, usize) {
+    let foreground = win::foreground_pid();
+    let mut back = Vec::new();
+    let mut refused = 0;
+    let mut changed = false;
+    for t in tracks.iter_mut().filter(|t| !t.let_through && crate::pause::can_pause(&t.rec.item)) {
+        let Some(exe) = t.rec.item.exe.clone() else { continue };
+        let running: Vec<(u32, u64)> = procs
+            .named(&exe)
+            .filter(|p| p.session == session && p.created >= sign_in && p.pid != me && matches(&exe, p))
+            .map(|p| (p.pid, p.created))
+            .collect();
+        if crate::pause::wants_back(&t.frozen, t.frozen_at, &running, foreground) {
+            for &(pid, _) in &t.frozen {
+                win::resume_process(pid);
+            }
+            t.frozen.clear();
+            t.let_through = true;
+            back.push(t.rec.item.name.clone());
+            changed = true;
+            continue;
+        }
+        let mut froze = false;
+        for k in running {
+            if t.frozen.contains(&k) {
+                continue;
+            }
+            if win::suspend_process(k.0) {
+                t.frozen.insert(k);
+                froze = true;
+            } else {
+                refused += 1;
+            }
+        }
+        if froze {
+            t.frozen_at = win::now_ft();
+            changed = true;
+        }
+    }
+    if changed {
+        save_frozen(tracks);
+    }
+    (back, refused)
+}
+
+fn save_frozen(tracks: &[Track]) {
+    let all: HashSet<(u32, u64)> = tracks.iter().flat_map(|t| t.frozen.iter().copied()).collect();
+    crate::pause::save(&all);
+}
+
+/// Ends a pause: every frozen process carries on. Returns how many.
+fn resume_all(tracks: &mut [Track]) -> usize {
+    let mut n = 0;
+    for t in tracks.iter_mut() {
+        for &(pid, _) in &t.frozen {
+            n += win::resume_process(pid) as usize;
+        }
+        t.frozen.clear();
+        t.let_through = false;
+    }
+    save_frozen(tracks);
+    n
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_track(
     t: &mut Track,
-    procs: &[Proc],
+    procs: &ProcIndex,
     services: &[win::ServiceStatus],
     tasks: &[win::LogonTask],
     session: u32,
@@ -482,7 +680,8 @@ fn update_track(
             match s.state {
                 win::ServiceState::Running => {
                     if t.rec.status != Status::Started {
-                        let host = procs.iter().find(|p| p.pid == s.pid).map(|p| p.created);
+                        // Service hosts run in session 0, outside the list.
+                        let host = win::process_created(s.pid);
                         if t.seen_down {
                             t.rec.start_ms = Some(now_ms);
                         } else if let Some(c) = host.filter(|&c| c >= sign_in) {
@@ -513,7 +712,7 @@ fn update_track(
             };
             let me = std::process::id();
             let mut current: HashMap<(u32, u64), (u64, u64)> = HashMap::new();
-            for p in procs {
+            for p in procs.named(&exe) {
                 if p.session != session || p.created < sign_in || !matches(&exe, p) {
                     continue;
                 }
@@ -617,6 +816,9 @@ impl Track {
             seen_down: false,
             late: false,
             never_starts: false,
+            frozen: HashSet::new(),
+            frozen_at: 0,
+            let_through: false,
         }
     }
 }
@@ -650,6 +852,30 @@ mod tests {
 
     fn proc(name: &str, path: Option<&str>) -> Proc {
         Proc { pid: 10, name: name.into(), path: path.map(Into::into), session: 1, created: 0, cpu: 0, io: 0 }
+    }
+
+    #[test]
+    fn the_index_finds_what_matching_would() {
+        let all = vec![
+            proc("teams.exe", Some(r"c:\apps\teams\teams.exe")),
+            proc("ms-teams.exe", Some(r"c:\program files\windowsapps\msteams_1\ms-teams.exe")),
+            proc("chrome.exe", Some(r"c:\program files\google\chrome\application\chrome.exe")),
+            proc("chrome.exe", None),
+        ];
+        let index = ProcIndex::new(&all);
+        let exes = [
+            r"c:\apps\teams\teams.exe",
+            "teams",
+            "teams.exe",
+            r"c:\users\me\appdata\local\microsoft\windowsapps\msteams_8wekyb3d8bbwe\ms-teams.exe",
+            r"c:\program files\google\chrome\application\chrome.exe",
+            r"c:\nowhere\nothing.exe",
+        ];
+        for exe in exes {
+            let by_index = index.named(exe).filter(|p| matches(exe, p)).count();
+            let by_scan = all.iter().filter(|p| matches(exe, p)).count();
+            assert_eq!(by_index, by_scan, "{exe}");
+        }
     }
 
     #[test]
@@ -696,12 +922,18 @@ mod tests {
             let cpu = (own_cpu(&mut lister) - c0) / n as u64;
             println!("{name:<22} wall {wall:>5} ms  own cpu {cpu:>5} ms  (each of {n})");
         };
+        time("counters open (cold)", 1, &mut || drop(win::Counters::open()));
         time("logon_tasks", 5, &mut || drop(win::logon_tasks()));
+        let runs = win::TaskRuns::open();
+        let all = win::logon_tasks();
+        let paths: Vec<&str> = all.iter().map(|t| t.path.as_str()).collect();
+        time("task last runs", 5, &mut || drop(runs.last_runs(&paths)));
+        assert_eq!(runs.last_runs(&paths).iter().map(|t| t.last_run).collect::<Vec<_>>(), all.iter().map(|t| t.last_run).collect::<Vec<_>>());
         time("service_statuses", 20, &mut || drop(win::service_statuses()));
         let mut l2 = win::ProcessLister::default();
         time("process list", 20, &mut || drop(l2.list()));
         time("startup gather", 3, &mut || drop(crate::startup::gather()));
-        let mut c = win::Counters::open().expect("pdh");
+        let mut c = win::Counters::open().expect("counters");
         time("counters sample", 20, &mut || drop(c.sample()));
     }
 
@@ -726,7 +958,7 @@ mod tests {
         if let Some(s) = items.iter().find(|i| !i.item_kind_is_not_service()) {
             println!("e.g. {}: {}", s.name, s.about);
         }
-        let mut c = win::Counters::open().expect("pdh");
+        let mut c = win::Counters::open().expect("counters");
         std::thread::sleep(Duration::from_millis(1000));
         println!("cpu/disk {:?}, mem {}", c.sample(), win::memory_load());
         println!("work area {:?}", win::work_area_points());

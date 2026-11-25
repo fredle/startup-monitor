@@ -174,7 +174,7 @@ fn record_block(out: &mut String, b: &BootRecord) {
     for r in items {
         let _ = writeln!(
             out,
-            "  {:?} | {} | {} | start={} ready={} est={} before_sign_in={} counts={} | cpu={}ms io={} | id={}",
+            "  {:?} | {} | {} | start={} ready={} est={} before_sign_in={} counts={} system={} | cpu={}ms io={} | id={}",
             r.status,
             r.item.name,
             r.item.origin(),
@@ -183,6 +183,7 @@ fn record_block(out: &mut String, b: &BootRecord) {
             r.estimated,
             r.before_sign_in,
             r.counts(),
+            r.item.runs_as_system(),
             r.cpu_ms,
             r.io_bytes,
             r.item.id,
@@ -284,6 +285,7 @@ mod tests {
             command: String::new(),
             exe: None,
             about: String::new(),
+            as_system: false,
         };
         ItemRecord { status, start_ms: start, ..ItemRecord::new(item) }
     }

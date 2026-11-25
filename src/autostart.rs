@@ -41,9 +41,13 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// The early-mode task: at this user's sign-in, run the collector with
-/// highest available rights and normal priority (4; tasks default to 7).
-pub fn early_task_xml(exe: &str, user: &str) -> String {
+/// The early-mode task: at this user's sign-in, run the collector at normal
+/// priority (4; tasks default to 7). With `highest`, it runs with the
+/// highest rights the user has, which for an administrator means elevated;
+/// only an administrator can register that. Without, it runs with the
+/// user's normal rights, which anyone can register for themselves.
+pub fn early_task_xml(exe: &str, user: &str, highest: bool) -> String {
+    let level = if highest { "HighestAvailable" } else { "LeastPrivilege" };
     let exe = xml_escape(exe);
     let user = xml_escape(user);
     let name = xml_escape(crate::brand::NAME);
@@ -63,7 +67,7 @@ pub fn early_task_xml(exe: &str, user: &str) -> String {
     <Principal id="Author">
       <UserId>{user}</UserId>
       <LogonType>InteractiveToken</LogonType>
-      <RunLevel>HighestAvailable</RunLevel>
+      <RunLevel>{level}</RunLevel>
     </Principal>
   </Principals>
   <Settings>
@@ -97,19 +101,24 @@ fn user_name() -> String {
     }
 }
 
-/// Registers the early-mode task. Shows one administrator prompt. Returns a
-/// message for the user on failure.
+/// Does turning on early mode need an administrator prompt? Only for an
+/// administrator's account, whose task runs elevated so the collector sees
+/// elevated apps too. Anyone else registers it with their own rights.
+pub fn early_needs_admin() -> bool {
+    win::user_is_admin()
+}
+
+/// Registers the early-mode task: quietly for a standard account, with one
+/// administrator prompt for an administrator's (or if a quiet attempt is
+/// refused, as some company policies do). Returns a message for the user
+/// on failure.
 pub fn enable_early() -> Result<(), String> {
-    let dir = crate::settings::data_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("early-task.xml");
-    let xml = early_task_xml(&exe(), &user_name());
-    let mut bytes = vec![0xFF, 0xFE];
-    bytes.extend(xml.encode_utf16().flat_map(|c| c.to_le_bytes()));
-    std::fs::write(&path, bytes).map_err(|e| format!("Could not write the task file: {e}"))?;
-    let args = format!("/Create /TN \"{TASK_NAME}\" /XML \"{}\" /F", path.display());
-    let code = win::shell_run("schtasks.exe", &args, true, true, true);
-    let _ = std::fs::remove_file(&path);
+    let admin = early_needs_admin();
+    let code = if admin { None } else { register_early(false, false)? };
+    let code = match code {
+        Some(0) => Some(0),
+        _ => register_early(true, true)?,
+    };
     match code {
         Some(0) => {
             set_standard(false);
@@ -120,11 +129,30 @@ pub fn enable_early() -> Result<(), String> {
     }
 }
 
-/// Removes the early-mode task (one administrator prompt) and goes back to
-/// the standard Run entry.
+/// Writes the task file and runs `schtasks` on it; `elevate` asks for
+/// administrator approval. The exit code, or None if approval was refused.
+fn register_early(highest: bool, elevate: bool) -> Result<Option<u32>, String> {
+    let dir = crate::settings::data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("early-task.xml");
+    let xml = early_task_xml(&exe(), &user_name(), highest);
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend(xml.encode_utf16().flat_map(|c| c.to_le_bytes()));
+    std::fs::write(&path, bytes).map_err(|e| format!("Could not write the task file: {e}"))?;
+    let args = format!("/Create /TN \"{TASK_NAME}\" /XML \"{}\" /F", path.display());
+    let code = win::shell_run("schtasks.exe", &args, elevate, true, true);
+    let _ = std::fs::remove_file(&path);
+    Ok(code)
+}
+
+/// Removes the early-mode task and goes back to the standard Run entry. A
+/// task the user registered goes quietly; one made with administrator
+/// rights needs one prompt.
 pub fn disable_early() -> Result<(), String> {
     let args = format!("/Delete /TN \"{TASK_NAME}\" /F");
-    match win::shell_run("schtasks.exe", &args, true, true, true) {
+    let quiet = win::shell_run("schtasks.exe", &args, false, true, true);
+    let result = if quiet == Some(0) { quiet } else { win::shell_run("schtasks.exe", &args, true, true, true) };
+    match result {
         Some(_) => {
             set_standard(true);
             Ok(())
@@ -144,8 +172,8 @@ pub fn remove_all() {
     }
     set_standard(false);
     if settings.early {
-        // The task was made with administrator rights, so a quiet delete is
-        // usually refused; ask once only then.
+        // A task made with administrator rights refuses a quiet delete; ask
+        // once only then.
         let args = format!("/Delete /TN \"{TASK_NAME}\" /F");
         if win::shell_run("schtasks.exe", &args, false, true, true) != Some(0) {
             win::shell_run("schtasks.exe", &args, true, true, true);
@@ -159,10 +187,12 @@ mod tests {
 
     #[test]
     fn task_runs_the_collector_at_normal_priority() {
-        let xml = early_task_xml(r"C:\Users\a&b\App\current\app.exe", r"PC\a&b");
+        let xml = early_task_xml(r"C:\Users\a&b\App\current\app.exe", r"PC\a&b", true);
         assert!(xml.contains("<Priority>4</Priority>"));
         assert!(xml.contains("<LogonTrigger>"));
         assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        let plain = early_task_xml(r"C:\App\app.exe", r"PC\a", false);
+        assert!(plain.contains("<RunLevel>LeastPrivilege</RunLevel>"));
         assert!(xml.contains(r"<Command>C:\Users\a&amp;b\App\current\app.exe</Command>"));
         assert!(xml.contains("<Arguments>--collect --early</Arguments>"));
         assert!(xml.contains(r"<UserId>PC\a&amp;b</UserId>"));
@@ -171,5 +201,25 @@ mod tests {
     #[test]
     fn run_entry_quotes_the_path() {
         assert_eq!(run_command(r"C:\x y\r.exe"), r#""C:\x y\r.exe" --collect"#);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    /// Registers the real early task without administrator rights, checks
+    /// it, and removes it again without them: run with --ignored on a PC
+    /// where early mode is off.
+    #[test]
+    #[ignore]
+    fn live_early_task_without_admin() {
+        let query = format!("/Query /TN \"{TASK_NAME}\"");
+        assert_ne!(win::shell_run("schtasks.exe", &query, false, true, true), Some(0), "early mode is on here: not touching it");
+        assert_eq!(register_early(false, false).unwrap(), Some(0), "quiet registration refused");
+        assert_eq!(win::shell_run("schtasks.exe", &query, false, true, true), Some(0), "task not there");
+        let delete = format!("/Delete /TN \"{TASK_NAME}\" /F");
+        assert_eq!(win::shell_run("schtasks.exe", &delete, false, true, true), Some(0), "quiet delete refused");
+        assert_ne!(win::shell_run("schtasks.exe", &query, false, true, true), Some(0), "task still there");
     }
 }

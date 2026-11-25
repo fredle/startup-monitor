@@ -147,14 +147,10 @@ pub fn window_mark(ui: &mut egui::Ui, p: &Palette) {
         .show(ui, |_| {});
 }
 
-/// The sign-in overlay's mark: an accent rule down its left edge.
-pub fn overlay_mark(ui: &mut egui::Ui, p: &Palette) {
-    egui::Panel::left("accent_rule")
-        .exact_size(4.0)
-        .resizable(false)
-        .show_separator_line(false)
-        .frame(egui::Frame::new().fill(p.accent))
-        .show(ui, |_| {});
+
+/// The palette for a light or dark look, for drawing outside egui.
+pub fn palette_for(dark: bool) -> Palette {
+    if dark { DARK } else { LIGHT }
 }
 
 pub fn palette(ctx: &egui::Context) -> Palette {
@@ -574,7 +570,9 @@ pub fn strong() -> FontId {
 }
 
 /// The sign-in overlay's window size.
-pub const OVERLAY_SIZE: Vec2 = vec2(330.0, 176.0);
+/// The sign-in overlay (drawn with GDI in `overlay.rs`) has a 4 pt accent rule
+/// down its left edge.
+pub const OVERLAY_RULE: bool = true;
 /// Height of a row in the startup list.
 pub const ROW_HEIGHT: f32 = 48.0;
 /// Width of the name column in the timeline.

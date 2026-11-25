@@ -3,15 +3,14 @@
 //! and the menu has Open and Quit. It is how the user gets back to the app
 //! after the overlay has hidden itself.
 //!
-//! It runs on its own thread with its own hidden window and message loop,
-//! because eframe stops calling the app while the main window is hidden.
-//! Plain Win32 through the `windows` crate.
+//! It runs on its own thread with its own hidden window and message loop.
+//! That hidden window is also how the full window, a separate process,
+//! reaches the collector (see `live.rs`). Plain Win32 through the
+//! `windows` crate.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicIsize, Ordering};
 
-use eframe::egui;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -20,16 +19,15 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
-    GetCursorPos, GetMessageW, GetSystemMetrics, HICON, IMAGE_ICON, IsIconic, LR_DEFAULTCOLOR, LoadImageW, MF_STRING,
-    MSG, PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SW_RESTORE, SW_SHOW,
-    SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-    WNDCLASSW,
+    GetCursorPos, GetMessageW, GetSystemMetrics, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, MF_STRING, MSG,
+    PostMessageW, RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SM_CYSMICON, SetForegroundWindow,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_CONTEXTMENU, WM_COPYDATA, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::history;
-use crate::monitor::Shared;
+use crate::monitor::Handle;
 
 const CLASS: PCWSTR = crate::brand::TRAY_CLASS;
 /// From the tray icon; `lparam` is the mouse message.
@@ -42,14 +40,9 @@ const MENU_QUIT: usize = 2;
 
 /// The tray thread's hidden window, 0 while there is none.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
-/// The user asked for the window from the tray; the app picks this up.
-static OPEN: AtomicBool = AtomicBool::new(false);
 
 struct State {
-    shared: Arc<Mutex<Shared>>,
-    /// The main window, as a number so it can cross threads.
-    main_window: isize,
-    ctx: egui::Context,
+    handle: Handle,
     icon: HICON,
     /// The tooltip now shown, to call Windows only on a change.
     tip: String,
@@ -79,14 +72,12 @@ pub fn tip(listed: bool, done: bool, finished: bool, progress: (usize, usize), u
 
 /// Puts the icon in the notification area. Does nothing if Windows will not
 /// create it: the app then works as before, without a way back once hidden.
-pub fn start(shared: Arc<Mutex<Shared>>, main_window: isize, ctx: egui::Context) {
+pub fn start(handle: Handle) {
     std::thread::spawn(move || unsafe {
         let Some(window) = create_window() else { return };
         STATE.with_borrow_mut(|state| {
             *state = Some(State {
-                shared,
-                main_window,
-                ctx,
+                handle,
                 icon: load_icon(),
                 tip: String::new(),
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
@@ -121,11 +112,6 @@ pub fn remove() {
     }
 }
 
-/// True once after the user asked for the window from the tray.
-pub fn take_open_request() -> bool {
-    OPEN.swap(false, Ordering::SeqCst)
-}
-
 unsafe fn create_window() -> Option<HWND> {
     unsafe {
         let instance = GetModuleHandleW(None).ok()?;
@@ -139,8 +125,8 @@ unsafe fn create_window() -> Option<HWND> {
             return None;
         }
         // Never shown. Not a message-only window: those do not get the
-        // "TaskbarCreated" broadcast.
-        CreateWindowExW(
+        // "TaskbarCreated" broadcast, nor can the full window find it.
+        let window = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
             PCWSTR(crate::win::wide(crate::brand::NAME).as_ptr()),
@@ -154,7 +140,13 @@ unsafe fn create_window() -> Option<HWND> {
             Some(instance.into()),
             None,
         )
-        .ok()
+        .ok()?;
+        // The collector may run as administrator (its sign-in task asks for
+        // the highest rights there are) while the full window does not:
+        // let the window's messages through.
+        use windows::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW};
+        let _ = ChangeWindowMessageFilterEx(window, WM_COPYDATA, MSGFLT_ALLOW, None);
+        Some(window)
     }
 }
 
@@ -214,7 +206,7 @@ fn update(window: HWND, add: bool) {
     // The state is only borrowed for a moment at a time: Windows may call
     // `window_proc` again while a tray call below is waiting for Explorer.
     let Some((shared, icon, shown)) =
-        STATE.with_borrow(|state| state.as_ref().map(|s| (s.shared.clone(), s.icon, s.tip.clone())))
+        STATE.with_borrow(|state| state.as_ref().map(|s| (s.handle.shared.clone(), s.icon, s.tip.clone())))
     else {
         return;
     };
@@ -238,20 +230,9 @@ fn update(window: HWND, add: bool) {
     });
 }
 
-/// Shows the main window and asks the app to open the full view in it.
-fn open(window: HWND) {
-    let Some((main_window, ctx)) = STATE.with_borrow(|state| state.as_ref().map(|s| (s.main_window, s.ctx.clone())))
-    else {
-        return;
-    };
-    let _ = window;
-    OPEN.store(true, Ordering::SeqCst);
-    unsafe {
-        let main = hwnd(main_window);
-        let _ = ShowWindow(main, if IsIconic(main).as_bool() { SW_RESTORE } else { SW_SHOW });
-        let _ = SetForegroundWindow(main);
-    }
-    ctx.request_repaint();
+/// Opens the full window, in a process of its own.
+fn open(_window: HWND) {
+    crate::overlay::open_window(None);
 }
 
 fn menu(window: HWND) {
@@ -273,6 +254,7 @@ fn menu(window: HWND) {
                 // The record is saved as it changes; a sign-in that is not
                 // usable yet is simply not recorded.
                 remove();
+                crate::pause::release_all();
                 std::process::exit(0);
             }
             _ => {}
@@ -293,6 +275,11 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
         WM_REFRESH => {
             update(window, false);
             LRESULT(0)
+        }
+        WM_COPYDATA => {
+            let handle = STATE.with_borrow(|state| state.as_ref().map(|s| s.handle.clone()));
+            let ours = handle.is_some_and(|h| unsafe { crate::live::on_copydata(&h, window, wparam, lparam) });
+            LRESULT(ours as isize)
         }
         _ => {
             let taskbar_created = STATE.with_borrow(|state| state.as_ref().map(|s| s.taskbar_created)).unwrap_or(0);

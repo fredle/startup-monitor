@@ -1,9 +1,14 @@
-//! The window. Run with `--collect` (at sign-in) it opens as a small
-//! always-on-top overlay over a live collector and can grow into the full
-//! window; run normally it shows the last boot's report. The footer with the
-//! auto-update toggle and version is required on every factory app.
+//! The full window, and the entry point for both ways the app runs.
+//!
+//! Run with `--collect` (at sign-in) it watches with no egui at all: the
+//! collector, a tray icon and a small GDI overlay (`overlay.rs`), a few
+//! megabytes in all. The full window is this egui app in a process of its
+//! own, started only when the user opens it; while a sign-in is being
+//! watched it shows it live through `live.rs`, and when it closes its
+//! memory goes back to Windows. The footer with the auto-update toggle and
+//! version is required on every factory app.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, Align, Layout, Rect, RichText, Sense, pos2, vec2};
 
@@ -18,8 +23,6 @@ const WIDTH: f32 = 600.0;
 const HEIGHT: f32 = 680.0;
 /// How many scenes screenshot mode captures (see `show_scene`).
 const SHOT_SCENES: usize = 4;
-/// Seconds the overlay stays up after "Ready" before closing itself.
-const READY_LINGER: f64 = 8.0;
 
 /// The app's own icon for the title bar and taskbar, drawn by
 /// `assets/make-icon.ps1`. Without it the window shows egui's logo.
@@ -31,76 +34,55 @@ fn window_icon() -> egui::IconData {
     }
 }
 
-fn overlay_position() -> Option<egui::Pos2> {
-    let (_, _, right, bottom) = win::work_area_points()?;
-    Some(pos2(right - theme::OVERLAY_SIZE.x - 16.0, bottom - theme::OVERLAY_SIZE.y - 16.0))
-}
-
 pub fn run(args: Vec<String>) -> eframe::Result<()> {
     let shots = args.iter().any(|a| a == "--shots");
-    let collect = !shots && args.iter().any(|a| a == autostart::COLLECT_ARG);
-    let mut _guard = None;
-    let mut live = None;
-    if collect {
-        let settings = crate::settings::load();
-        if !settings.watch {
-            return Ok(());
-        }
-        // One collector per session, even if both the Run entry and the
-        // early task fire.
-        _guard = win::single_instance(crate::brand::COLLECTOR_MUTEX);
-        if _guard.is_none() {
-            return Ok(());
-        }
-        // Start watching now, before the window exists: at sign-in, creating
-        // the window took ten seconds, and nothing was watched meanwhile.
-        let mode = if args.iter().any(|a| a == autostart::EARLY_ARG) { Mode::Early } else { Mode::Standard };
-        let window: Arc<OnceLock<egui::Context>> = Arc::new(OnceLock::new());
-        let repaint = window.clone();
-        let handle = monitor::spawn(mode, settings.delayed.clone(), move || {
-            if let Some(ctx) = repaint.get() {
-                ctx.request_repaint();
-            }
-            crate::tray::refresh();
-        });
-        live = Some((handle, window));
+    if !shots && args.iter().any(|a| a == autostart::COLLECT_ARG) {
+        collect(&args);
+        return Ok(());
     }
-    let mut viewport = egui::ViewportBuilder::default()
+    // One full window: opening it again brings the open one forward.
+    let _window_guard = if shots {
+        None
+    } else {
+        let guard = win::single_instance(&format!(r"Local\{}Window", crate::brand::ID));
+        if guard.is_none() {
+            win::focus_existing_window();
+            return Ok(());
+        }
+        guard
+    };
+    let viewport = egui::ViewportBuilder::default()
         .with_title(crate::brand::NAME)
         .with_icon(window_icon())
-        .with_min_inner_size([300.0, 150.0]);
-    if collect {
-        viewport = viewport
-            .with_inner_size(theme::OVERLAY_SIZE)
-            .with_decorations(false)
-            .with_always_on_top()
-            .with_resizable(false);
-        if let Some(pos) = overlay_position() {
-            viewport = viewport.with_position(pos);
-        }
-    } else {
-        viewport = viewport.with_inner_size([WIDTH, HEIGHT]).with_min_inner_size([520.0, 560.0]);
-    }
+        .with_inner_size([WIDTH, HEIGHT])
+        .with_min_inner_size([520.0, 560.0]);
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
     };
-    let result = eframe::run_native(
-        crate::brand::NAME,
-        options,
-        Box::new(move |cc| Ok(Box::new(App::new(&args, &cc.egui_ctx, live, main_window(cc))))),
-    );
-    crate::tray::remove();
-    result
+    eframe::run_native(crate::brand::NAME, options, Box::new(move |cc| Ok(Box::new(App::new(&args, &cc.egui_ctx)))))
 }
 
-/// The main window's handle, for the tray icon to show it again.
-fn main_window(cc: &eframe::CreationContext<'_>) -> Option<isize> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    match cc.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
-        _ => None,
+/// Watches this sign-in: the collector, the tray icon and the overlay, with
+/// no egui. Never returns: the collector ends the process when done.
+fn collect(args: &[String]) {
+    let settings = crate::settings::load();
+    if !settings.watch {
+        return;
     }
+    // One collector per session, even if both the Run entry and the early
+    // task fire.
+    let Some(_guard) = win::single_instance(crate::brand::COLLECTOR_MUTEX) else { return };
+    // Anything a pause in an earlier run left frozen carries on.
+    crate::pause::release_all();
+    win::dpi_aware();
+    let mode = if args.iter().any(|a| a == autostart::EARLY_ARG) { Mode::Early } else { Mode::Standard };
+    let handle = monitor::spawn(mode, settings.delayed.clone(), || {
+        crate::tray::refresh();
+        crate::overlay::refresh();
+    });
+    crate::tray::start(handle.clone());
+    crate::overlay::run(handle);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -140,14 +122,10 @@ pub struct App {
     version: String,
     shots: Option<Shots>,
     live: Option<monitor::Handle>,
-    /// Shown as the small sign-in overlay rather than the full window.
-    overlay: bool,
     /// The East Asian fallback fonts are loaded.
     wide_fonts: bool,
     /// Showing the first-launch question about starting earlier.
     ask_early: bool,
-    /// When the overlay first showed "Ready".
-    ready_since: Option<f64>,
     /// Normal launch: the last boot and its predecessors' totals.
     report: Option<(BootRecord, Vec<u64>)>,
     /// Normal launch with no history: what is set to start.
@@ -159,18 +137,23 @@ pub struct App {
     show_services: bool,
     options: bool,
     note: Option<(String, Tone, f64)>,
+    /// A "pause the rest" in progress, as of this frame.
+    pause: Option<crate::pause::PauseView>,
 }
 
 impl App {
-    fn new(
-        args: &[String],
-        ctx: &egui::Context,
-        live: Option<(monitor::Handle, Arc<OnceLock<egui::Context>>)>,
-        window: Option<isize>,
-    ) -> Self {
-        let collect = live.is_some();
+    fn new(args: &[String], ctx: &egui::Context) -> Self {
         theme::apply(ctx);
-        theme::install_fonts(ctx, !collect);
+        // A sign-in still being watched: show it live.
+        let live = if args.iter().any(|a| a == "--shots") {
+            None
+        } else {
+            let repaint = ctx.clone();
+            crate::live::attach(move || repaint.request_repaint())
+        };
+        // The wide fonts are a big read: not while startup is being timed.
+        let timing = live.as_ref().is_some_and(|h| !h.shared.lock().unwrap().done);
+        theme::install_fonts(ctx, !timing);
         // For checking both looks without changing Windows' setting.
         if let Some(theme) = crate::shots::theme_from_args(args) {
             ctx.set_theme(theme);
@@ -181,18 +164,17 @@ impl App {
             version: crate::update::current_version(),
             shots,
             live: None,
-            overlay: collect,
-            wide_fonts: !collect,
+            wide_fonts: !timing,
             ask_early: false,
-            ready_since: None,
             report: None,
             configured: Arc::new(Mutex::new(None)),
             fake: None,
-            tab: Tab::Items,
+            tab: if args.windows(2).any(|a| a[0] == "--tab" && a[1] == "cost") { Tab::Cost } else { Tab::Items },
             open_row: None,
             show_services: false,
             options: false,
             note: None,
+            pause: None,
         };
         if app.shots.is_some() {
             // Screenshots show the app as a new user first sees it.
@@ -208,20 +190,15 @@ impl App {
             }
             app.settings.set_up = true;
             app.save();
-        } else if !collect && app.settings.watch && !app.settings.early && !autostart::standard_is_set() {
+        } else if app.settings.watch && !app.settings.early && !autostart::standard_is_set() {
             // The Run entry was removed elsewhere: respect that.
             app.settings.watch = false;
             app.save();
         }
         // Asked once, the first time the app is opened by hand: that is before
         // the first watched sign-in, when the answer matters most.
-        app.ask_early = !collect && app.settings.watch && !app.settings.early && !app.settings.asked_early;
-        if let Some((handle, slot)) = live {
-            // The collector has been running since before the window existed.
-            let _ = slot.set(ctx.clone());
-            if let Some(window) = window {
-                crate::tray::start(handle.shared.clone(), window, ctx.clone());
-            }
+        app.ask_early = live.is_none() && app.settings.watch && !app.settings.early && !app.settings.asked_early;
+        if let Some(handle) = live {
             app.live = Some(handle);
         } else {
             let all = history::load();
@@ -276,22 +253,6 @@ impl App {
         self.note = Some((text.into(), tone, ctx.input(|i| i.time)));
     }
 
-    fn expand(&mut self, ctx: &egui::Context) {
-        self.overlay = false;
-        self.log_event("window opened");
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(WIDTH, HEIGHT)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(520.0, 560.0)));
-        if let Some((l, t, r, b)) = win::work_area_points() {
-            let x = l + ((r - l) - WIDTH) / 2.0;
-            let y = t + ((b - t) - HEIGHT - 32.0).max(0.0) / 2.0;
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos2(x, y)));
-        }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-
     /// A line for the collector's diagnostics log.
     fn log_event(&self, text: &str) {
         if let Some(h) = &self.live {
@@ -303,7 +264,7 @@ impl App {
     /// fonts. They are some 50 MB to read, enough to count as a busy disk and
     /// push "usable" back, so they wait until the timing is over.
     fn load_wide_fonts_when_free(&mut self, ctx: &egui::Context) {
-        if self.wide_fonts || self.overlay {
+        if self.wide_fonts {
             return;
         }
         if self.live.as_ref().is_some_and(|h| !h.shared.lock().unwrap().done) {
@@ -312,40 +273,6 @@ impl App {
         self.wide_fonts = true;
         theme::install_fonts(ctx, true);
         self.log_event("wide fonts loaded");
-    }
-
-    /// Back to the small overlay by the notification area.
-    fn collapse(&mut self, ctx: &egui::Context) {
-        self.overlay = true;
-        self.ready_since = None;
-        self.log_event("window back to overlay");
-        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
-        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(vec2(300.0, 150.0)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(theme::OVERLAY_SIZE));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(false));
-        if let Some(pos) = overlay_position() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-        }
-    }
-
-    /// Closing a window while the collector is still watching must not end
-    /// it: the full window goes back to the overlay, and the overlay hides.
-    fn keep_watching_on_close(&mut self, ctx: &egui::Context) {
-        if !ctx.input(|i| i.viewport().close_requested()) {
-            return;
-        }
-        let Some(h) = self.live.clone() else { return };
-        if h.shared.lock().unwrap().finished {
-            return;
-        }
-        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        if self.overlay {
-            h.shared.lock().unwrap().exit_when_done = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        } else {
-            self.collapse(ctx);
-        }
     }
 
     // ------------------------------------------------------------ scenes
@@ -517,97 +444,55 @@ impl App {
         }
     }
 
-    // ------------------------------------------------------------ overlay
-
-    fn overlay_ui(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let p = theme::palette(&ctx);
-        let Some(view) = self.view() else { return };
-        let full = ui.max_rect();
-        let background = ui.interact(full, ui.id().with("overlay"), Sense::click());
-        if background.clicked() {
-            self.expand(&ctx);
-        }
-        let (done, total) = view.record.progress();
-        let m = view.metrics.unwrap_or_default();
-        ui.horizontal(|ui| {
-            if view.done {
-                theme::live_pill(ui, "Ready", Tone::Success, false, p);
-            } else {
-                theme::live_pill(ui, "Starting up", Tone::Accent, true, p);
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::icon_button(ui, Icon::Close, p).on_hover_text("Hide. Timing carries on.").clicked() {
-                    if let Some(h) = &self.live {
-                        let mut s = h.shared.lock().unwrap();
-                        if s.finished {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        } else {
-                            s.exit_when_done = true;
-                            s.events.push("overlay hidden".to_owned());
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    /// "Pause the rest", or how a pause in progress stands with a way to end it.
+    fn pause_row(&mut self, ui: &mut egui::Ui, view: &View, p: Palette) {
+        let now_ms = view.metrics.map(|m| m.elapsed_ms).unwrap_or(0);
+        match self.pause.clone() {
+            Some(pause) => {
+                ui.horizontal(|ui| {
+                    let left = history::fmt_secs(pause.until_ms.saturating_sub(now_ms).div_ceil(1000) * 1000);
+                    let what = match pause.items.len() {
+                        0 => "Pausing startup apps".to_owned(),
+                        1 => "1 app paused".to_owned(),
+                        n => format!("{n} apps paused"),
+                    };
+                    ui.label(RichText::new(what).font(theme::strong()).color(p.text));
+                    ui.label(RichText::new(format!("{left} left")).color(p.muted));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(theme::secondary_button(p, "Resume now"))
+                            .on_hover_text("Let every paused app carry on starting.")
+                            .clicked()
+                        {
+                            self.send_pause(false);
                         }
-                    }
-                }
-                if theme::icon_button(ui, Icon::Expand, p).on_hover_text("Open the full window").clicked() {
-                    self.expand(&ctx);
-                }
-            });
-        });
-        ui.add_space(4.0);
-        if view.done {
-            ui.label(
-                RichText::new(format!("Usable after {}", history::fmt_secs(view.record.usable_ms)))
-                    .font(theme::title())
-                    .color(p.text),
-            );
-            let line = comparison(view.record.usable_ms, &view.totals)
-                .map(|(t, _)| t)
-                .unwrap_or_else(|| "First watched sign-in.".to_owned());
-            ui.label(RichText::new(line).color(p.muted));
-            ui.add_space(2.0);
-            if theme::text_link(ui, "See what took the time", p).clicked() {
-                self.tab = Tab::Cost;
-                self.expand(&ctx);
-            }
-            let now = ctx.input(|i| i.time);
-            let since = *self.ready_since.get_or_insert(now);
-            if now - since > READY_LINGER && self.overlay {
-                // Late starters may still be watched: hide, and let the
-                // collector end the process when it has finished.
-                let finished = self.live.as_ref().is_none_or(|h| {
-                    let mut s = h.shared.lock().unwrap();
-                    s.exit_when_done = true;
-                    s.finished
+                    });
                 });
-                let cmd = if finished { egui::ViewportCommand::Close } else { egui::ViewportCommand::Visible(false) };
-                ctx.send_viewport_cmd(cmd);
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
-            return;
+            None if !view.done => {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(theme::secondary_button(p, "Pause the rest"))
+                        .on_hover_text(format!(
+                            "Freezes your startup apps for {} minutes so you can get on with work.                              Open one and it carries on at once. Windows and security software are never paused.",
+                            crate::pause::PAUSE_MS / 60_000
+                        ))
+                        .clicked()
+                    {
+                        self.send_pause(true);
+                    }
+                    ui.label(RichText::new("Enough already? Get to work first.").font(theme::small()).color(p.muted));
+                });
+            }
+            None => {}
         }
-        ui.horizontal(|ui| {
-            let count = if view.listed { format!("{done} of {total} started") } else { "Reading the startup list".to_owned() };
-            ui.label(RichText::new(count).font(theme::strong()).color(p.text));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(fmt_clock(m.elapsed_ms)).font(theme::strong()).color(p.text));
-            });
-        });
-        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
-        let fraction = (total > 0).then(|| done as f32 / total as f32);
-        theme::progress_track(ui.painter(), bar, fraction, ctx.input(|i| i.time), p);
-        ui.add_space(2.0);
-        ui.label(RichText::new(eta_text(m.eta_ms)).font(theme::small()).color(p.muted));
-        ui.label(
-            RichText::new(format!(
-                "CPU {:.0}%   Memory {:.0}%   Disk {}/s",
-                m.cpu,
-                m.mem,
-                history::fmt_bytes(m.disk as u64)
-            ))
-            .font(theme::small())
-            .color(p.muted),
-        );
+    }
+
+    fn send_pause(&mut self, pause: bool) {
+        if let Some(h) = &self.live {
+            h.send(if pause { monitor::Request::Pause } else { monitor::Request::Resume });
+            h.shared.lock().unwrap().events.push(if pause { "pause pressed" } else { "resume pressed" }.to_owned());
+        }
     }
 
     // ------------------------------------------------------------ full window
@@ -717,7 +602,6 @@ impl App {
     }
 
     fn summary_card(&mut self, ui: &mut egui::Ui, view: &View, p: Palette) {
-        let ctx = ui.ctx().clone();
         let live = !view.done;
         theme::card(p).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -746,18 +630,11 @@ impl App {
             });
 
             if live {
-                let (done, total) = view.record.progress();
                 let m = view.metrics.unwrap_or_default();
                 ui.add_space(6.0);
-                let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
-                let fraction = (total > 0).then(|| done as f32 / total as f32);
-                theme::progress_track(ui.painter(), bar, fraction, ctx.input(|i| i.time), p);
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    let count = if view.listed { format!("{done} of {total} started") } else { "Reading the startup list".into() };
-                    ui.label(RichText::new(count).font(theme::strong()).color(p.text));
-                    ui.label(RichText::new(eta_text(m.eta_ms)).color(p.muted));
-                });
+                split_progress(ui, view, 92.0, 8.0, p);
+                ui.add_space(2.0);
+                ui.label(RichText::new(eta_text(m.eta_ms)).color(p.muted));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let gap = 24.0;
@@ -768,6 +645,8 @@ impl App {
                     let disk_mb = m.disk / 1_048_576.0;
                     theme::meter(ui, "Disk", &format!("{}/s", history::fmt_bytes(m.disk as u64)), (disk_mb / 100.0) as f32, w, p);
                 });
+                ui.add_space(8.0);
+                self.pause_row(ui, view, p);
             } else {
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
@@ -783,6 +662,16 @@ impl App {
                             }
                         }
                         ui.label(RichText::new(when_line(&view.record)).font(theme::small()).color(p.muted));
+                        if let Some(at) = view.record.paused_ms {
+                            ui.label(
+                                RichText::new(format!(
+                                    "You paused startup at {}, so this sign-in is left out of your usual time.",
+                                    fmt_clock(at)
+                                ))
+                                .font(theme::small())
+                                .color(p.muted),
+                            );
+                        }
                     });
                     if !view.totals.is_empty() {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -793,6 +682,10 @@ impl App {
                         });
                     }
                 });
+                if self.pause.is_some() {
+                    ui.add_space(6.0);
+                    self.pause_row(ui, view, p);
+                }
             }
         });
     }
@@ -867,7 +760,11 @@ impl App {
             for text in [
                 format!("{} is set to open with your other startup apps, so it cannot watch anything that starts before it does. It works out those timings afterwards.", crate::brand::NAME),
                 "Start earlier opens it the moment you sign in. You see everything as it happens, and you can stop an app before it opens.".to_owned(),
-                "Windows will ask for administrator approval once. You can change this at any time in Options.".to_owned(),
+                if autostart::early_needs_admin() {
+                    "Windows will ask for administrator approval once. You can change this at any time in Options.".to_owned()
+                } else {
+                    "No administrator approval is needed. You can change this at any time in Options.".to_owned()
+                },
             ] {
                 ui.add(egui::Label::new(RichText::new(text).font(theme::body()).color(p.muted)).wrap());
                 ui.add_space(4.0);
@@ -912,10 +809,12 @@ impl App {
             // row: a row never wraps, and the text ran out of the card.
             egui::Frame::new().inner_margin(egui::Margin { left: 26, right: 0, top: 0, bottom: 0 }).show(ui, |ui| {
                 ui.add(egui::Label::new(
-                    RichText::new(
+                    RichText::new(if autostart::early_needs_admin() {
                         "Watches from the first second of sign-in and can stop apps before they open. \
-                         Asks for administrator approval once, and again to turn it off.",
-                    )
+                         Asks for administrator approval once, and again to turn it off."
+                    } else {
+                        "Watches from the first second of sign-in and can stop apps before they open."
+                    })
                     .font(theme::small())
                     .color(p.muted),
                 ).wrap());
@@ -1028,7 +927,8 @@ impl App {
                 egui::Shape::rect_filled(rect.expand2(vec2(6.0, 0.0)), theme::CONTROL_RADIUS, p.hover),
             );
         }
-        let (label, tone) = status_label(r);
+        let paused = self.pause.as_ref().is_some_and(|x| x.items.contains(&r.item.id));
+        let (label, tone) = if paused { ("Paused", Tone::Accent) } else { status_label(r) };
         let icon = match r.item.kind() {
             Kind::App => Icon::App,
             Kind::Task => Icon::Clock,
@@ -1051,19 +951,22 @@ impl App {
         };
         let text_w = (w - 46.0 - pill_w - 16.0).max(40.0);
         let own = r.item.is_self();
-        let tag = "This app";
-        let tag_w = if own { 70.0 } else { 0.0 };
+        // Services sit under their own heading: only tasks need the tag.
+        let system = !own && r.item.kind() != Kind::Service && r.item.runs_as_system();
+        let tag = if own { "This app" } else { "System" };
+        let tag_w = if own || system { 70.0 } else { 0.0 };
         let name = theme::truncated(ui.painter(), &r.item.name, theme::strong(), p.text, text_w - tag_w);
         let name_w = name.size().x;
         ui.painter().galley(pos2(rect.left() + 46.0, rect.top() + 6.0), name, p.text);
-        if own {
-            // So it is not mistaken for someone else's startup item.
+        if own || system {
+            // "This app", so it is not mistaken for someone else's startup
+            // item; "System" for what runs as Windows or administrator.
             ui.painter().text(
                 pos2(rect.left() + 46.0 + name_w + 8.0, rect.top() + 8.0),
                 egui::Align2::LEFT_TOP,
                 tag,
                 theme::small(),
-                p.accent_text,
+                if own { p.accent_text } else { p.muted },
             );
         }
         let sub = match mode {
@@ -1311,6 +1214,40 @@ fn disclosure(ui: &mut egui::Ui, text: &str, open: bool, p: Palette) -> egui::Re
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// One progress row each for what runs as the user and what runs as
+/// Windows or administrator: a label `label_w` wide, a bar, and the count.
+fn split_progress(ui: &mut egui::Ui, view: &View, label_w: f32, bar_h: f32, p: Palette) {
+    if !view.listed {
+        ui.label(RichText::new("Reading the startup list").font(theme::strong()).color(p.text));
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), bar_h), Sense::hover());
+        theme::progress_track(ui.painter(), bar, None, ui.input(|i| i.time), p);
+        return;
+    }
+    let (yours, system) = view.record.progress_split();
+    let rows = [
+        ("Your apps", yours, "Startup apps and tasks that run as you: the ones you can pause or turn off."),
+        ("System", system, "Services, and tasks that run as Windows or with administrator rights."),
+    ];
+    for (label, (done, total), about) in rows {
+        let count = format!("{done} of {total}");
+        ui.horizontal(|ui| {
+            let (r, resp) = ui.allocate_exact_size(vec2(label_w, 20.0), Sense::hover());
+            ui.painter().text(r.left_center(), egui::Align2::LEFT_CENTER, label, theme::strong(), p.text);
+            resp.on_hover_text(about);
+            let count_w = 64.0;
+            let bar_w = (ui.available_width() - count_w).max(40.0);
+            let (row, _) = ui.allocate_exact_size(vec2(bar_w, 20.0), Sense::hover());
+            let bar = egui::Rect::from_center_size(row.center(), vec2(bar_w, bar_h));
+            // Nothing of a kind to wait for: an empty track, not a full bar.
+            let fraction = if total > 0 { Some(done as f32 / total as f32) } else { Some(0.0) };
+            theme::progress_track(ui.painter(), bar, fraction, ui.input(|i| i.time), p);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(count).color(p.muted));
+            });
+        });
+    }
+}
+
 /// Pill text and tone for a status.
 fn status_label(r: &ItemRecord) -> (&'static str, Tone) {
     match r.status {
@@ -1354,7 +1291,7 @@ fn describe(r: &ItemRecord, mode: Mode, watch_from_ms: u64, live: bool) -> Strin
 }
 
 /// "6 s slower than your usual 42 s", with a tone.
-fn comparison(current_ms: u64, totals: &[u64]) -> Option<(String, Tone)> {
+pub(crate) fn comparison(current_ms: u64, totals: &[u64]) -> Option<(String, Tone)> {
     let diff = history::versus_usual(current_ms, totals)?;
     let usual = history::fmt_secs(history::median(totals)?);
     let d = history::fmt_secs(diff.unsigned_abs());
@@ -1367,7 +1304,7 @@ fn comparison(current_ms: u64, totals: &[u64]) -> Option<(String, Tone)> {
     })
 }
 
-fn eta_text(eta: Option<u64>) -> String {
+pub(crate) fn eta_text(eta: Option<u64>) -> String {
     match eta {
         None => "No estimate on the first watched sign-in".to_owned(),
         Some(ms) if ms < 3_000 => "Almost ready".to_owned(),
@@ -1376,7 +1313,7 @@ fn eta_text(eta: Option<u64>) -> String {
 }
 
 /// "0:32", "1:05".
-fn fmt_clock(ms: u64) -> String {
+pub(crate) fn fmt_clock(ms: u64) -> String {
     let s = ms / 1000;
     format!("{}:{:02}", s / 60, s % 60)
 }
@@ -1438,6 +1375,7 @@ fn demo_record(at: Option<u64>) -> BootRecord {
             command: format!("\"C:\\Program Files\\{0}\\{0}.exe\" --background", name.replace(' ', "")),
             exe: Some(exe),
             about: String::new(),
+            as_system: kind == 1,
         };
         let start_ms = (start * 1000.0) as u64;
         let ready_ms = start_ms + (busy * 1000.0) as u64;
@@ -1471,6 +1409,7 @@ fn demo_record(at: Option<u64>) -> BootRecord {
             command: String::new(),
             exe: None,
             about: String::new(),
+            as_system: false,
         });
         r.status = Status::Started;
         r.before_sign_in = i < 4;
@@ -1488,6 +1427,7 @@ fn demo_record(at: Option<u64>) -> BootRecord {
         watch_from_ms: 1_900,
         watched_ms: 49_000,
         items,
+        paused_ms: None,
     }
 }
 
@@ -1497,35 +1437,13 @@ impl eframe::App for App {
         if let Some(scene) = self.shots.as_mut().and_then(|shots| shots.drive(&ctx, SHOT_SCENES)) {
             self.show_scene(scene);
         }
-        self.keep_watching_on_close(&ctx);
         if let Some(h) = &self.live {
-            h.shared.lock().unwrap().frames += 1;
+            let mut s = h.shared.lock().unwrap();
+            s.frames += 1;
+            self.pause = s.pause.clone();
         }
         self.load_wide_fonts_when_free(&ctx);
-        if crate::tray::take_open_request() {
-            // Asked for from the tray icon: the window is wanted again, so
-            // the collector must not end the process behind it.
-            if let Some(h) = &self.live {
-                h.shared.lock().unwrap().exit_when_done = false;
-            }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            if self.overlay {
-                self.expand(&ctx);
-            }
-        }
         let p = theme::palette(&ctx);
-        if self.overlay {
-            theme::overlay_mark(ui_root, &p);
-            egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(p.surface)
-                        .stroke(egui::Stroke::new(1.0, p.border))
-                        .inner_margin(egui::Margin::same(14)),
-                )
-                .show(ui_root, |ui| self.overlay_ui(ui));
-            return;
-        }
         theme::window_mark(ui_root, &p);
         egui::Panel::bottom("footer")
             .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::symmetric(16, 8)))

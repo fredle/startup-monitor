@@ -40,6 +40,10 @@ pub struct Item {
     /// For services: what it is, in one line.
     #[serde(default)]
     pub about: String,
+    /// A sign-in task that runs as a system account or with administrator
+    /// rights. Services always count as system: see `runs_as_system`.
+    #[serde(default)]
+    pub as_system: bool,
 }
 
 impl Item {
@@ -64,6 +68,13 @@ impl Item {
             Source::Task { path } => path.eq_ignore_ascii_case(crate::autostart::TASK_NAME),
             _ => false,
         }
+    }
+
+    /// Runs as Windows or with administrator rights rather than as the
+    /// signed-in user: services, and tasks set up that way. Startup apps and
+    /// startup-folder entries always run as the user.
+    pub fn runs_as_system(&self) -> bool {
+        self.kind() == Kind::Service || self.as_system
     }
 
     /// Per-user entries can be turned off without administrator rights.
@@ -280,6 +291,7 @@ pub fn gather() -> Vec<Item> {
                 source: Source::Run { machine, wow32, once, value },
                 command,
                 about: String::new(),
+                as_system: false,
             });
         }
     }
@@ -314,6 +326,7 @@ pub fn gather() -> Vec<Item> {
                 command,
                 exe,
                 about: String::new(),
+                as_system: false,
             });
         }
     }
@@ -332,6 +345,7 @@ pub fn gather() -> Vec<Item> {
             source: Source::Task { path: task.path.clone() },
             command: task.command.clone(),
             about: String::new(),
+            as_system: task.as_system,
         });
     }
 
@@ -343,6 +357,7 @@ pub fn gather() -> Vec<Item> {
             source: Source::Service { name: svc.name.clone(), delayed: svc.delayed },
             command: svc.binary.clone(),
             about: first_sentence(&svc.description),
+            as_system: true,
         });
     }
     items
@@ -479,6 +494,7 @@ mod tests {
             command: String::new(),
             exe: None,
             about: String::new(),
+            as_system: false,
         };
         assert!(item.can_disable());
         item.source = Source::Run { machine: true, wow32: false, once: false, value: "X".into() };
