@@ -136,6 +136,27 @@ const DARK: Palette = Palette {
     error_soft: hex(0x40202A),
 };
 
+/// The app's own mark on the main window, drawn before its other panels:
+/// an accent band along its top edge.
+pub fn window_mark(ui: &mut egui::Ui, p: &Palette) {
+    egui::Panel::top("accent_band")
+        .exact_size(4.0)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(p.accent))
+        .show(ui, |_| {});
+}
+
+/// The sign-in overlay's mark: an accent rule down its left edge.
+pub fn overlay_mark(ui: &mut egui::Ui, p: &Palette) {
+    egui::Panel::left("accent_rule")
+        .exact_size(4.0)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::new().fill(p.accent))
+        .show(ui, |_| {});
+}
+
 pub fn palette(ctx: &egui::Context) -> Palette {
     match ctx.theme() {
         Theme::Dark => DARK,

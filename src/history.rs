@@ -30,9 +30,9 @@ pub enum Status {
     Exited,
     /// Never seen before the PC was ready.
     NotSeen,
-    /// Ended by the user from Windows Startup Monitor.
+    /// Ended by the user from the app.
     Ended,
-    /// Held back by Windows Startup Monitor until the PC was ready.
+    /// Held back by the app until the PC was ready.
     Delayed,
 }
 
@@ -81,7 +81,7 @@ impl ItemRecord {
     /// already started before sign-in. Delayed services come after "usable"
     /// by design and are left out.
     pub fn counts(&self) -> bool {
-        // Windows Startup Monitor itself has started by definition: not part of the count.
+        // The app itself has started by definition: not part of the count.
         if self.item.is_self() {
             return false;
         }
@@ -107,9 +107,9 @@ pub struct BootRecord {
     pub mode: Mode,
     /// ms from sign-in until usable.
     pub usable_ms: u64,
-    /// ms from sign-in until Windows Startup Monitor itself was running.
+    /// ms from sign-in until the app itself was running.
     pub watch_from_ms: u64,
-    /// ms from sign-in until Windows Startup Monitor stopped watching. Items still missing
+    /// ms from sign-in until the app stopped watching. Items still missing
     /// when the PC became usable are watched on until `WATCH_END_MS`.
     #[serde(default)]
     pub watched_ms: u64,
@@ -306,10 +306,10 @@ mod tests {
     }
 
     #[test]
-    fn startup_monitor_itself_is_listed_but_not_counted() {
-        let own_run = item("me", Source::Run { machine: false, wow32: false, once: false, value: "Windows Startup Monitor".into() });
-        let own_task = item("t", Source::Task { path: r"\startupmonitor\early start".into() });
-        let other = item("o", Source::Run { machine: true, wow32: false, once: false, value: "Windows Startup Monitor".into() });
+    fn the_app_itself_is_listed_but_not_counted() {
+        let own_run = item("me", Source::Run { machine: false, wow32: false, once: false, value: crate::brand::NAME.into() });
+        let own_task = item("t", Source::Task { path: crate::brand::TASK_NAME.to_lowercase() });
+        let other = item("o", Source::Run { machine: true, wow32: false, once: false, value: crate::brand::NAME.into() });
         assert!(own_run.is_self() && own_task.is_self());
         assert!(!other.is_self() && !app("teams").is_self());
         let mut b = boot(1, 0, &[("a", 0)]);

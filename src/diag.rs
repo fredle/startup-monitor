@@ -1,4 +1,4 @@
-//! Diagnostics for developing Windows Startup Monitor: a timed log of what the collector
+//! Diagnostics for developing the app: a timed log of what the collector
 //! saw and decided during a sign-in, and a plain-text report the user can
 //! copy from Options. Nothing here is sent anywhere; the report only leaves
 //! the PC if the user pastes it somewhere.
@@ -42,9 +42,11 @@ pub struct Tick {
     pub usable: bool,
     /// How long this tick's own work took.
     pub work_ms: u64,
-    /// Windows Startup Monitor's own processor time so far, ms.
+    /// The app's own processor time so far, ms.
     pub own_cpu_ms: u64,
     pub processes: usize,
+    /// Frames the window has drawn so far.
+    pub frames: u64,
 }
 
 impl Log {
@@ -98,7 +100,7 @@ impl Log {
             self.add(
                 t.now_ms,
                 format!(
-                    "tick  #{} cpu {:.0}% disk {:.1} MB/s mem {:.0}% | {done}/{total} done | quiet_since={} usable={} | {} processes | tick work {} ms (worst {}) | own cpu {} ms",
+                    "tick  #{} cpu {:.0}% disk {:.1} MB/s mem {:.0}% | {done}/{total} done | quiet_since={} usable={} | {} processes | tick work {} ms (worst {}) | own cpu {} ms | frames {}",
                     self.ticks,
                     t.cpu,
                     mb(t.disk),
@@ -109,6 +111,7 @@ impl Log {
                     t.work_ms,
                     self.worst_tick_ms,
                     t.own_cpu_ms,
+                    t.frames,
                 ),
             );
         }
@@ -192,7 +195,7 @@ fn record_block(out: &mut String, b: &BootRecord) {
 pub fn report(version: &str, settings: &Settings, live: Option<&BootRecord>) -> String {
     let mut out = String::new();
     let now = win::ft_to_unix(win::now_ft());
-    let _ = writeln!(out, "Windows Startup Monitor diagnostics");
+    let _ = writeln!(out, "{} diagnostics", crate::brand::NAME);
     let _ = writeln!(out, "=====================");
     let _ = writeln!(out, "version: {version}");
     let _ = writeln!(out, "generated: {} ({now})", when(now));
@@ -286,7 +289,7 @@ mod tests {
     }
 
     fn tick(now_ms: u64, quiet: bool) -> Tick {
-        Tick { now_ms, cpu: 10.0, disk: 0.0, mem: 40.0, quiet_since: quiet.then_some(now_ms), usable: false, work_ms: 3, own_cpu_ms: 0, processes: 1 }
+        Tick { now_ms, cpu: 10.0, disk: 0.0, mem: 40.0, quiet_since: quiet.then_some(now_ms), usable: false, work_ms: 3, own_cpu_ms: 0, processes: 1, frames: 0 }
     }
 
     /// Prints a real report: `cargo test --release -- --ignored live_report --nocapture`.

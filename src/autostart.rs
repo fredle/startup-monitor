@@ -1,4 +1,4 @@
-//! How Windows Startup Monitor itself starts at sign-in. Standard mode is a per-user Run
+//! How the app itself starts at sign-in. Standard mode is a per-user Run
 //! entry (no admin). Early mode is a logon scheduled task registered once
 //! with administrator approval, set to normal priority because tasks default
 //! to below-normal.
@@ -6,8 +6,8 @@
 use crate::win::{self, Hive};
 
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-pub const VALUE: &str = "Windows Startup Monitor";
-pub const TASK_NAME: &str = r"\StartupMonitor\Early start";
+pub const VALUE: &str = crate::brand::NAME;
+pub const TASK_NAME: &str = crate::brand::TASK_NAME;
 pub const COLLECT_ARG: &str = "--collect";
 pub const EARLY_ARG: &str = "--early";
 
@@ -46,11 +46,12 @@ fn xml_escape(s: &str) -> String {
 pub fn early_task_xml(exe: &str, user: &str) -> String {
     let exe = xml_escape(exe);
     let user = xml_escape(user);
+    let name = xml_escape(crate::brand::NAME);
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>Windows Startup Monitor: watches startup from the first second of sign-in, then closes.</Description>
+    <Description>{name}: watches startup from the first second of sign-in, then closes.</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -158,11 +159,11 @@ mod tests {
 
     #[test]
     fn task_runs_the_collector_at_normal_priority() {
-        let xml = early_task_xml(r"C:\Users\a&b\StartupMonitor\current\startup_monitor.exe", r"PC\a&b");
+        let xml = early_task_xml(r"C:\Users\a&b\App\current\app.exe", r"PC\a&b");
         assert!(xml.contains("<Priority>4</Priority>"));
         assert!(xml.contains("<LogonTrigger>"));
         assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
-        assert!(xml.contains(r"<Command>C:\Users\a&amp;b\StartupMonitor\current\startup_monitor.exe</Command>"));
+        assert!(xml.contains(r"<Command>C:\Users\a&amp;b\App\current\app.exe</Command>"));
         assert!(xml.contains("<Arguments>--collect --early</Arguments>"));
         assert!(xml.contains(r"<UserId>PC\a&amp;b</UserId>"));
     }

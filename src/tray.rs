@@ -1,6 +1,6 @@
 //! The notification-area icon shown while the collector is watching a
 //! sign-in. Its tooltip gives the progress, a click opens the full window,
-//! and the menu has Open and Quit. It is how the user gets back to Windows Startup Monitor
+//! and the menu has Open and Quit. It is how the user gets back to the app
 //! after the overlay has hidden itself.
 //!
 //! It runs on its own thread with its own hidden window and message loop,
@@ -31,7 +31,7 @@ use windows::core::{PCWSTR, w};
 use crate::history;
 use crate::monitor::Shared;
 
-const CLASS: PCWSTR = w!("StartupMonitorTrayWindow");
+const CLASS: PCWSTR = crate::brand::TRAY_CLASS;
 /// From the tray icon; `lparam` is the mouse message.
 const WM_TRAY: u32 = WM_APP + 1;
 /// The collector's state changed: bring the tooltip up to date.
@@ -67,13 +67,13 @@ fn hwnd(value: isize) -> HWND {
 /// The tooltip: where the sign-in has got to.
 pub fn tip(listed: bool, done: bool, finished: bool, progress: (usize, usize), usable_ms: u64) -> String {
     if !listed {
-        "Windows Startup Monitor: reading the startup list".to_owned()
+        format!("{}: reading the startup list", crate::brand::NAME)
     } else if !done {
-        format!("Windows Startup Monitor: {} of {} started", progress.0, progress.1)
+        format!("{}: {} of {} started", crate::brand::NAME, progress.0, progress.1)
     } else if !finished {
-        format!("Windows Startup Monitor: usable after {}. Still watching for late apps", history::fmt_secs(usable_ms))
+        format!("{}: usable after {}. Still watching for late apps", crate::brand::NAME, history::fmt_secs(usable_ms))
     } else {
-        format!("Windows Startup Monitor: usable after {}", history::fmt_secs(usable_ms))
+        format!("{}: usable after {}", crate::brand::NAME, history::fmt_secs(usable_ms))
     }
 }
 
@@ -143,7 +143,7 @@ unsafe fn create_window() -> Option<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
-            w!("Windows Startup Monitor"),
+            PCWSTR(crate::win::wide(crate::brand::NAME).as_ptr()),
             WINDOW_STYLE(0),
             0,
             0,
@@ -257,7 +257,7 @@ fn open(window: HWND) {
 fn menu(window: HWND) {
     unsafe {
         let Ok(popup) = CreatePopupMenu() else { return };
-        let _ = AppendMenuW(popup, MF_STRING, MENU_OPEN, w!("Open Windows Startup Monitor"));
+        let _ = AppendMenuW(popup, MF_STRING, MENU_OPEN, PCWSTR(crate::win::wide(&format!("Open {}", crate::brand::NAME)).as_ptr()));
         let _ = AppendMenuW(popup, MF_STRING, MENU_QUIT, w!("Quit"));
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
@@ -312,10 +312,10 @@ mod tests {
 
     #[test]
     fn tooltip_follows_the_sign_in() {
-        assert_eq!(tip(false, false, false, (0, 0), 0), "Windows Startup Monitor: reading the startup list");
-        assert_eq!(tip(true, false, false, (9, 15), 0), "Windows Startup Monitor: 9 of 15 started");
-        assert_eq!(tip(true, true, false, (15, 15), 48_000), "Windows Startup Monitor: usable after 48 s. Still watching for late apps");
-        assert_eq!(tip(true, true, true, (15, 15), 48_000), "Windows Startup Monitor: usable after 48 s");
+        assert_eq!(tip(false, false, false, (0, 0), 0), format!("{}: reading the startup list", crate::brand::NAME));
+        assert_eq!(tip(true, false, false, (9, 15), 0), format!("{}: 9 of 15 started", crate::brand::NAME));
+        assert_eq!(tip(true, true, false, (15, 15), 48_000), format!("{}: usable after 48 s. Still watching for late apps", crate::brand::NAME));
+        assert_eq!(tip(true, true, true, (15, 15), 48_000), format!("{}: usable after 48 s", crate::brand::NAME));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Small persisted preferences in %LOCALAPPDATA%\StartupMonitor\settings.json.
+//! Small persisted preferences in %LOCALAPPDATA%\<brand::ID>\settings.json.
 //! Add app-specific fields here, always with `#[serde(default)]` so older
 //! settings files keep loading.
 
@@ -27,10 +27,10 @@ pub struct Settings {
     /// The first-launch question about starting earlier has been answered.
     #[serde(default)]
     pub asked_early: bool,
-    /// Items Windows Startup Monitor holds back and starts once the PC is usable.
+    /// Items the app holds back and starts once the PC is usable.
     #[serde(default)]
     pub delayed: Vec<Item>,
-    /// Items turned off from Windows Startup Monitor, so they can be turned back on.
+    /// Items turned off from the app, so they can be turned back on.
     #[serde(default)]
     pub turned_off: Vec<Item>,
 }
@@ -56,7 +56,7 @@ impl Default for Settings {
 
 pub fn data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into()))
-        .join("StartupMonitor")
+        .join(crate::brand::ID)
 }
 
 fn settings_path() -> std::path::PathBuf {

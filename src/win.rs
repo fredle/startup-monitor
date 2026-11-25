@@ -1,4 +1,4 @@
-//! Thin wrappers over the Win32 calls Windows Startup Monitor needs: processes, services,
+//! Thin wrappers over the Win32 calls the app needs: processes, services,
 //! the registry, Task Scheduler, shortcuts, system counters and elevation.
 //! Everything here is direct API use, polled by the collector about once a
 //! second. No WMI, no PowerShell.

@@ -56,7 +56,7 @@ impl Item {
         self.kind() != Kind::Service
     }
 
-    /// Windows Startup Monitor's own sign-in entry: its Run value or its early-start task.
+    /// The app's own sign-in entry: its Run value or its early-start task.
     /// Listed for honesty about its cost, but never counted or acted on.
     pub fn is_self(&self) -> bool {
         match &self.source {
@@ -299,7 +299,7 @@ pub fn gather() -> Vec<Item> {
     for task in win::logon_tasks() {
         let exe = exe_from_command(&task.command, win::expand_env);
         let name = if task.path.eq_ignore_ascii_case(crate::autostart::TASK_NAME) {
-            "Windows Startup Monitor".to_owned()
+            crate::brand::NAME.to_owned()
         } else {
             pick_name(&task.name, exe.as_deref().and_then(win::file_description))
         };

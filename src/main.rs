@@ -1,14 +1,15 @@
-//! Windows Startup Monitor - A live boot stopwatch for your PC: every startup app timed from sign-in, with a report on what slowed it down.
+//! Entry point. The app's name and ids live in `brand.rs`, its look in `theme.rs`.
 //!
-//!   startup_monitor.exe                 open the app
-//!   startup_monitor.exe --auto-update   internal: background update check/download
-//!   startup_monitor.exe --shots <dir>   write screenshots of made-up scenes, then exit
-//!                                 (add --theme dark for the dark look)
+//!   app.exe                 open the app
+//!   app.exe --auto-update   internal: background update check/download
+//!   app.exe --shots <dir>   write screenshots of made-up scenes, then exit
+//!                           (add --theme dark for the dark look)
 
 #![windows_subsystem = "windows"]
 
 mod app;
 mod autostart;
+mod brand;
 mod diag;
 mod history;
 mod monitor;
