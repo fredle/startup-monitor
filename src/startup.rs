@@ -153,11 +153,33 @@ pub fn display_name(raw: &str) -> String {
         raw
     };
     if raw.contains('.') && !raw.contains(' ') {
-        if let Some(last) = raw.rsplit('.').find(|s| !s.is_empty()) {
-            return last.to_owned();
+        // `com.glean.desktop`: the last part is often a word that says
+        // nothing about the app, so the one before it names it.
+        let parts: Vec<&str> = raw.split('.').filter(|s| !s.is_empty()).collect();
+        if let Some(last) = parts.iter().rev().find(|s| !is_generic(s)).or(parts.last()) {
+            return capitalise(last);
         }
     }
     raw.to_owned()
+}
+
+/// Words installers use for the part of an app that starts with Windows,
+/// which on their own do not say which app it is.
+fn is_generic(word: &str) -> bool {
+    const WORDS: [&str; 14] = [
+        "desktop", "app", "application", "client", "launcher", "main", "startup", "autostart", "agent", "helper", "tray",
+        "service", "background", "electron",
+    ];
+    WORDS.contains(&word.to_lowercase().as_str())
+}
+
+/// `glean` becomes `Glean`; names with capitals of their own are kept.
+fn capitalise(word: &str) -> String {
+    if word.chars().any(|c| c.is_uppercase()) {
+        return word.to_owned();
+    }
+    let mut c = word.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// Drops the machine-made tails Windows and installers add to names: a user
@@ -179,7 +201,7 @@ pub fn clean_name(raw: &str) -> String {
 /// description when the entry name reads like an identifier.
 pub fn pick_name(raw: &str, description: Option<String>) -> String {
     let name = clean_name(&display_name(raw));
-    let machine_like = !name.contains(' ') && (name.len() >= 12 || name.contains('_'));
+    let machine_like = !name.contains(' ') && (name.len() >= 12 || name.contains('_') || is_generic(&name));
     match description {
         Some(d) if machine_like || name.is_empty() => d,
         _ => name,
@@ -435,6 +457,10 @@ mod tests {
         assert_eq!(pick_name("SecurityHealth", Some("Windows Security notification icon".into())), "Windows Security notification icon");
         assert_eq!(pick_name("OneDrive", Some("Microsoft OneDrive".into())), "OneDrive");
         assert_eq!(pick_name("Docker Desktop", None), "Docker Desktop");
+        assert_eq!(display_name("com.glean.desktop"), "Glean");
+        assert_eq!(pick_name("com.glean.desktop", Some("Glean".into())), "Glean");
+        assert_eq!(pick_name("desktop", Some("Glean".into())), "Glean");
+        assert_eq!(display_name("com.squirrel.Teams.Teams"), "Teams");
     }
 
     #[test]

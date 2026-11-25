@@ -77,6 +77,11 @@ impl ItemRecord {
         }
     }
 
+    /// Has run at some point since sign-in, or was settled by the app.
+    pub fn has_started(&self) -> bool {
+        self.start_ms.is_some() || matches!(self.status, Status::Started | Status::Exited | Status::Ended | Status::Delayed)
+    }
+
     /// Counted in "12 of 31": every app and task, and services that had not
     /// already started before sign-in. Delayed services come after "usable"
     /// by design and are left out.
@@ -117,10 +122,12 @@ pub struct BootRecord {
 }
 
 impl BootRecord {
-    /// (done, total) for the progress count.
+    /// (started, total) for the "12 of 31 started" count. Once an item has
+    /// started it stays counted: an app getting busy again, or one given up
+    /// on that turns up late, must not make the count go back down.
     pub fn progress(&self) -> (usize, usize) {
         let counted: Vec<_> = self.items.iter().filter(|r| r.counts()).collect();
-        (counted.iter().filter(|r| r.status.is_done()).count(), counted.len())
+        (counted.iter().filter(|r| r.has_started()).count(), counted.len())
     }
 }
 
@@ -405,6 +412,24 @@ mod tests {
         b.items.push(early_svc);
         b.items.push(late_svc);
         assert_eq!(b.progress(), (1, 3));
+    }
+
+    #[test]
+    fn the_started_count_does_not_go_back_down() {
+        let mut b = boot(1, 0, &[("a", 0)]);
+        let mut late = ItemRecord::new(app("late"));
+        late.status = Status::NotSeen;
+        b.items.push(late);
+        // Given up on: not started.
+        assert_eq!(b.progress(), (1, 2));
+        // Turns up late and is still busy: started.
+        b.items[1].status = Status::Starting;
+        b.items[1].start_ms = Some(98_000);
+        assert_eq!(b.progress(), (2, 2));
+        // A settled app that gets busy again stays started.
+        b.items[0].status = Status::Starting;
+        b.items[0].ready_ms = None;
+        assert_eq!(b.progress(), (2, 2));
     }
 
     #[test]
