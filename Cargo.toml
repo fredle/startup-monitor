@@ -1,6 +1,6 @@
 [package]
 name = "startup_monitor"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 description = "A live boot stopwatch for your PC: every startup app timed from sign-in, with a report on what slowed it down."
 repository = "https://github.com/fredle/startup-monitor"
