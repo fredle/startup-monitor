@@ -8,6 +8,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod feedback;
 mod autostart;
 mod brand;
 mod diag;

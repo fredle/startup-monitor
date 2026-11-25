@@ -120,6 +120,8 @@ enum Action {
 pub struct App {
     settings: crate::settings::Settings,
     version: String,
+    /// "What would make this better?" (src/feedback.rs).
+    feedback: crate::feedback::Feedback,
     shots: Option<Shots>,
     live: Option<monitor::Handle>,
     /// The East Asian fallback fonts are loaded.
@@ -162,6 +164,7 @@ impl App {
         let mut app = Self {
             settings: crate::settings::load(),
             version: crate::update::current_version(),
+            feedback: Default::default(),
             shots,
             live: None,
             wide_fonts: !timing,
@@ -1181,6 +1184,8 @@ impl App {
                         .font(theme::small())
                         .color(p.muted),
                 );
+                ui.add_space(8.0);
+                self.feedback.link(ui);
             });
         });
     }
@@ -1451,6 +1456,8 @@ impl eframe::App for App {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg).inner_margin(egui::Margin::same(16)))
             .show(ui_root, |ui| self.main_ui(ui));
+            let feedback_ctx = ui_root.ctx().clone();
+        self.feedback.show(&feedback_ctx, &self.version, self.shots.is_some());
     }
 }
 

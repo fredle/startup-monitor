@@ -72,6 +72,8 @@ To open at sign-in it adds a "Windows Startup Monitor" value to your account's R
 
 The app connects to the internet for one thing only: if "Automatically update" is on, it checks GitHub Releases about once a day for a newer version and downloads it. It sends no usage data, program lists or personal details anywhere. There is no telemetry and no account.
 
+Feedback: the "What would make this better?" link in the window lets you send the developer a short note. Only the note, the app's name and version, and the platform are sent, to the developer's server at feedback.leatham.net, and only when you press Send. No name, email address or device identifier is sent, and the server does not keep IP addresses. Notes are used only to improve the app and are never shared or sold.
+
 ## Screenshots
 
 1. Watch the clock - a live count of what has started and an estimate of the seconds left.

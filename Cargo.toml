@@ -10,6 +10,8 @@ eframe = { version = "0.36.2", default-features = false, features = ["glow", "de
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 velopack = "1.2"
+# Already in the build through velopack; used to send in-app feedback.
+ureq = "3"
 # The main window's handle, for the tray icon to show it again. Already in the
 # dependency tree through eframe.
 raw-window-handle = "0.6.2"
