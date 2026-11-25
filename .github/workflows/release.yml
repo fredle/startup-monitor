@@ -150,8 +150,23 @@ jobs:
           $version = $env:GITHUB_REF_NAME -replace '^v',''
           $url = "https://leathamdl.blob.core.windows.net/startup-monitor/$version/StartupMonitorSetup.exe"
 
-          $raw = msstore submission get $env:STORE_PRODUCT_ID
-          if ($LASTEXITCODE -ne 0) { throw "msstore submission get failed with exit code $LASTEXITCODE" }
+          $raw = msstore submission get $env:STORE_PRODUCT_ID 2>store-get.err
+          if ($LASTEXITCODE -ne 0) {
+            $said = (@($raw) + @(Get-Content store-get.err -ErrorAction SilentlyContinue)) -join "`n"
+            $plain = $said -replace '\x1b\[[0-9;]*m', ''
+            Write-Host $said
+            # The Store API cannot see a product until its first submission,
+            # made by hand, has passed review and gone live. Not a failure of
+            # this release: say so and carry on. While it is in review the
+            # API says it cannot read the draft's packages instead.
+            if ($plain -match 'No\s+Product\s+Found|Unable\s+to\s+Get\s+Draft\s+Product\s+Package') {
+              $note = "Not submitted to the Microsoft Store: the first submission is not live yet. Re-run this job, or release again, once it is."
+              Write-Host "::warning title=Microsoft Store::$note"
+              $note | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              exit 0
+            }
+            throw "msstore submission get failed with exit code $LASTEXITCODE"
+          }
           $submission = ($raw -join "`n") | ConvertFrom-Json
 
           $pkg = $submission.Packages | Where-Object { $_.Architectures -contains 'X64' } | Select-Object -First 1
