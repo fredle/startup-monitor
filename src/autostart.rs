@@ -28,6 +28,19 @@ pub fn set_standard(on: bool) -> bool {
     }
 }
 
+/// Moves a Run entry filed under a name the app used to have to its current
+/// name, keeping the command. Run at every start, before anything reads the
+/// entry, so a renamed app neither starts twice nor leaves the old one behind.
+pub fn adopt_old_names() {
+    for old in crate::brand::OLD_NAMES {
+        let Some(command) = win::reg_get_text(Hive::User, RUN, old) else { continue };
+        if !standard_is_set() {
+            win::reg_set_text(Hive::User, RUN, VALUE, &command);
+        }
+        win::reg_delete(Hive::User, RUN, old);
+    }
+}
+
 /// The Run entry's command line as it stands, for diagnostics.
 pub fn standard_command() -> Option<String> {
     win::reg_get_text(Hive::User, RUN, VALUE)
@@ -170,6 +183,7 @@ pub fn remove_all() {
     for item in &settings.delayed {
         crate::startup::set_enabled(item, true);
     }
+    adopt_old_names();
     set_standard(false);
     if settings.early {
         // A task made with administrator rights refuses a quiet delete; ask

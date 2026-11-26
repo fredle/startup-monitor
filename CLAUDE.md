@@ -1,4 +1,4 @@
-# Windows Startup Monitor
+# Startup Monitor
 
 Watch your PC start up: what has launched, what is still to come, and how long until it is usable.
 

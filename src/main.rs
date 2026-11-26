@@ -41,6 +41,11 @@ fn main() {
         update::maybe_spawn_background_update();
     }
 
+    // A renamed app finds its sign-in entry under the old name.
+    if !args.iter().any(|a| a == "--shots") {
+        autostart::adopt_old_names();
+    }
+
     // A pause that a quit or crash cut short must not leave apps frozen.
     // While a collector runs, its pause is its own business.
     if !args.iter().any(|a| a == "--shots") && !win::mutex_exists(brand::COLLECTOR_MUTEX) {

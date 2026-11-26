@@ -625,7 +625,7 @@ pub fn live_pill(ui: &mut egui::Ui, text: &str, tone: Tone, pulse: bool, p: Pale
     let alpha = if pulse {
         // Dim and bright on alternate seconds. No repaint is asked for: the
         // collector's once-a-second tick redraws the window anyway, and a
-        // smooth 20-frames-a-second pulse made Windows Startup Monitor the most expensive
+        // smooth 20-frames-a-second pulse made Startup Monitor the most expensive
         // thing at sign-in.
         let t = ui.input(|i| i.time);
         if (t as u64) % 2 == 0 { 1.0 } else { 0.5 }

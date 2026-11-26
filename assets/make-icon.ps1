@@ -33,7 +33,7 @@ function New-RoundRect([single]$x, [single]$y, [single]$w, [single]$h, [single]$
 # no thin lines, no more than three elements.
 #   $g      the Graphics to draw on (anti-aliased)
 #   $left, $top, $size   the square the mark must stay inside
-# Windows Startup Monitor's mark: a speedometer gauge, the boot being timed.
+# Startup Monitor's mark: a speedometer gauge, the boot being timed.
 # Three shapes: a thick open dial with round ends, a needle and its hub.
 function Draw-Mark($g, [single]$left, [single]$top, [single]$size) {
     $white = [System.Drawing.Color]::White

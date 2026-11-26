@@ -1,8 +1,8 @@
-# Windows Startup Monitor - Microsoft Store listing
+# Startup Monitor - Microsoft Store listing
 
 ## Product name
 
-Windows Startup Monitor
+Startup Monitor
 
 ## Short description
 
@@ -10,7 +10,7 @@ A live boot stopwatch for your PC: every startup app timed from sign-in, with a 
 
 ## Description
 
-Windows Startup Monitor times your sign-in. From the moment your desktop appears it counts the programs, scheduled tasks and services that Windows is bringing up, marks each one as waiting, starting or done, and tells you when the machine has settled down enough to use.
+Startup Monitor times your sign-in. From the moment your desktop appears it counts the programs, scheduled tasks and services that Windows is bringing up, marks each one as waiting, starting or done, and tells you when the machine has settled down enough to use.
 
 During sign-in a compact panel sits in the corner of the screen with a running clock, a progress count ("8 of 13 started"), processor, memory and disk readings, and an estimate of the seconds remaining. The estimate is built only from your own previous sign-ins, so the first one shows a clock with no forecast. Once the PC is quiet the panel records the session and disappears; anything that has not appeared yet is followed from the notification area for up to ten minutes before the app exits.
 
@@ -19,7 +19,7 @@ Every sign-in is kept as a report you can open later:
 - A chart of every item from start to settled, with a marker at the point the PC became usable
 - A ranking of the programs that took the most processor time and disk activity, and the ones that were slowest to finish
 
-When the report points at a culprit, deal with it from the same row. Programs registered for your account can be switched off at sign-in (the same reversible switch Task Manager uses) or deferred, so Windows Startup Monitor launches them only after everything else has finished. A running program can also be closed straight from the list.
+When the report points at a culprit, deal with it from the same row. Programs registered for your account can be switched off at sign-in (the same reversible switch Task Manager uses) or deferred, so Startup Monitor launches them only after everything else has finished. A running program can also be closed straight from the list.
 
 What is checked: Run and RunOnce registry entries, the personal and shared Startup folders, scheduled tasks triggered at logon, and automatic and delayed services. Services are shown for information only, each with a short plain-English description.
 
@@ -64,11 +64,11 @@ Subcategory: System utilities (or "Other" if not offered)
 
 ## Privacy
 
-Windows Startup Monitor keeps two files in %LOCALAPPDATA%\StartupMonitor:
+Startup Monitor keeps two files in %LOCALAPPDATA%\StartupMonitor:
 - settings.json holds your choices, including the programs you deferred or switched off.
 - boots.json holds the timings of your 30 most recent sign-ins: program names, start times, processor time and disk use.
 
-To open at sign-in it adds a "Windows Startup Monitor" value to your account's Run registry key, or, in early mode, a logon scheduled task. Either is removed when you switch the option off, and both are removed on uninstall.
+To open at sign-in it adds a "Startup Monitor" value to your account's Run registry key, or, in early mode, a logon scheduled task. Either is removed when you switch the option off, and both are removed on uninstall.
 
 The app connects to the internet for one thing only: if "Automatically update" is on, it checks GitHub Releases about once a day for a newer version and downloads it. It sends no usage data, program lists or personal details anywhere. There is no telemetry and no account.
 

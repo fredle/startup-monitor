@@ -1,10 +1,10 @@
-# Windows Startup Monitor
+# Startup Monitor
 
 A live boot stopwatch for your PC: every startup app timed from sign-in, with
 a report on what slowed it down.
 
 After you sign in, Windows spends a minute or more launching startup apps and
-services and shows you nothing about it. Windows Startup Monitor opens a small window at
+services and shows you nothing about it. Startup Monitor opens a small window at
 sign-in with a count ("9 of 15 started"), CPU, memory and disk activity, and
 the time left. Once the PC has settled it saves the boot's timings and closes.
 
@@ -25,13 +25,13 @@ the time left. Once the PC has settled it saves the boot's timings and closes.
   boot shows no estimate rather than a guess.
 - Per app: end it now, turn it off at sign-in, or hold it back until the PC is
   usable. Turning an app off uses the same switch as Task Manager's Startup
-  apps page, so you can turn it back on there or in Windows Startup Monitor. Only entries
+  apps page, so you can turn it back on there or in Startup Monitor. Only entries
   for your own account can be turned off or held back. Services are shown
   read-only.
 
 ### Two ways to start
 
-- **Standard** (default, no administrator rights): Windows Startup Monitor starts with your
+- **Standard** (default, no administrator rights): Startup Monitor starts with your
   other startup apps and rebuilds what happened before it opened from each
   process's start time and processor time. Programs that started and closed
   before it opened are missing, and the timeline says so.
@@ -46,12 +46,12 @@ What it cost. Esc closes Options or an open row.
 
 ## Install
 
-- **Microsoft Store**: search for "Windows Startup Monitor".
+- **Microsoft Store**: search for "Startup Monitor".
 - **GitHub Releases**: download the `Setup.exe` from the
   [releases page](https://github.com/fredle/startup-monitor/releases). It installs
   for your account only and needs no administrator rights.
 
-Open Windows Startup Monitor once after installing. From then on it opens by itself at each
+Open Startup Monitor once after installing. From then on it opens by itself at each
 sign-in. To stop that, turn off "Watch every sign-in" in Options.
 
 ## Where data lives
@@ -61,10 +61,10 @@ Everything stays in `%LOCALAPPDATA%\StartupMonitor`:
 - `settings.json`: your options, and the apps you held back or turned off.
 - `boots.json`: timings of your last 30 boots.
 
-Windows Startup Monitor also writes these, and removes them when you turn the matching
+Startup Monitor also writes these, and removes them when you turn the matching
 option off:
 
-- A `Windows Startup Monitor` value under
+- A `Startup Monitor` value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (standard mode).
 - A `\StartupMonitor\Early start` scheduled task (Start earlier).
 - `StartupApproved` values under
@@ -77,7 +77,7 @@ option off:
 - Process, service and startup information is read on your PC with Windows
   APIs and never leaves it.
 - The only network use is the update check: about once a day, if "Automatically
-  update" is on, Windows Startup Monitor asks GitHub Releases for a newer version and
+  update" is on, Startup Monitor asks GitHub Releases for a newer version and
   downloads it.
 
 ## Building
